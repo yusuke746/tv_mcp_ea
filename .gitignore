@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# 仮想環境
+.venv/
+venv/
+env/
+
+# 環境変数・機密情報
+.env
+*.env
+.env.local
+
+# ログ
+logs/
+*.log
+
+# 状態ファイル（描画エンティティID）
+state/drawing_state.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# テスト・カバレッジ
+.pytest_cache/
+htmlcov/
+.coverage

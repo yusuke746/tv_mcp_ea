@@ -1,0 +1,83 @@
+system:
+  scan_interval_seconds: 300           # 5分ごとにスキャン
+  cdp_host: "localhost"
+  cdp_port: 9222
+  fx_system_webhook_url: "http://localhost:8000/webhook/mcp"
+  log_level: "INFO"
+  state_file: "state/drawing_state.json"
+
+pairs:
+  - tv_symbol: "OANDA:USDJPY"
+    mt5_symbol: "USDJPY"
+    pair_name: "USDJPY"
+    category: "fx"
+    pip_size: 0.01
+  - tv_symbol: "OANDA:EURUSD"
+    mt5_symbol: "EURUSD"
+    pair_name: "EURUSD"
+    category: "fx"
+    pip_size: 0.0001
+  - tv_symbol: "OANDA:GBPJPY"
+    mt5_symbol: "GBPJPY"
+    pair_name: "GBPJPY"
+    category: "fx"
+    pip_size: 0.01
+  - tv_symbol: "OANDA:XAUUSD"
+    mt5_symbol: "XAUUSD"
+    pair_name: "XAUUSD"
+    category: "gold"
+    pip_size: 0.01
+
+llm:
+  model: "gpt-5-mini"
+  api_key_env: "OPENAI_API_KEY"        # .envから読む
+  pattern_score_threshold: 60          # 描画対象パターンの最低スコア
+
+risk:
+  mcp_max_positions: 2
+  mcp_max_fx_positions: 1
+  mcp_max_gold_positions: 1
+
+tp_sl:
+  fx_tp_atr_multiplier: 2.0
+  fx_sl_atr_multiplier: 1.5
+  gold_tp_atr_multiplier: 2.5
+  gold_sl_atr_multiplier: 2.5
+  gold_lot_scale: 0.5                  # GOLDはFX比50%ロット
+  min_rr: 1.3
+
+breakout:
+  score_threshold: 7                   # 発注に必要な最低スコア（10点満点）
+  volume_surge_ratio: 1.5              # 出来高急増の閾値倍率
+  body_ratio_min: 0.5                  # 実体/(高値-安値) 最低比率
+  cooldown_seconds: 900                # 同一パターン再発注クールダウン（15分）
+
+detection:
+  timeframe_entry: "M15"               # ブレイク検知の時間足
+  timeframe_bias: "H1"                 # バイアス判定の時間足
+  timeframe_htf: "H4"                  # 上位足バイアスの時間足
+  bars_entry: 200                      # エントリー足の取得バー数
+  bars_bias: 100                       # バイアス足の取得バー数
+  bars_htf: 60                         # 上位足の取得バー数
+  sr_lookback_bars: 150                # S/R検出範囲（エントリー足）
+  swing_order: 5                       # スイング検出の感度（前後Nバーで高値/安値判定）
+  sr_cluster_pips: 5.0                 # S/Rクラスタリングの価格幅（pips）
+  sr_min_touches: 2                    # S/Rとして認定する最低タッチ数
+  triangle_min_touches: 2              # トライアングル各辺の最低スイングポイント数
+  triangle_max_bars: 100               # トライアングル探索範囲(バー数)
+  channel_r2_min: 0.80                 # 平行チャネルの線形回帰R²最低値
+  channel_max_bars: 80                 # チャネル探索範囲(バー数)
+
+drawing:
+  sr_color_resistance: "#FF4444"
+  sr_color_support: "#00C853"
+  sr_color_mid: "#FFB300"
+  triangle_color: "#2196F3"
+  channel_color: "#9C27B0"
+  line_width: 2
+
+# MT5接続設定（fx_systemの.envと共有可能）
+mt5:
+  login_env: "MT5_LOGIN"
+  password_env: "MT5_PASSWORD"
+  server_env: "MT5_SERVER"
