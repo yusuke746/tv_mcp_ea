@@ -2,7 +2,7 @@ system:
   scan_interval_seconds: 300           # 5分ごとにスキャン
   cdp_host: "localhost"
   cdp_port: 9222
-  fx_system_webhook_url: "http://localhost:8000/webhook/mcp"
+  fx_system_webhook_url: "http://localhost:80/webhook/mcp"
   log_level: "INFO"
   state_file: "state/drawing_state.json"
 
