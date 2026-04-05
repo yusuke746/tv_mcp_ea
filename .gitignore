@@ -26,6 +26,7 @@ logs/
 
 # 状態ファイル（描画エンティティID）
 state/drawing_state.json
+state/alert_state.json
 
 # IDE
 .vscode/
