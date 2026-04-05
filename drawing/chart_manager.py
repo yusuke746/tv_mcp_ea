@@ -52,11 +52,18 @@ def _bar_to_time(df: pd.DataFrame, bar_index: int) -> int:
     """bar_index（0-based、古い順）から Unix タイムスタンプを求める。"""
     n = len(df)
     if 0 <= bar_index < n:
-        return int(df.iloc[int(bar_index)]["time"])
+        t = df.iloc[int(bar_index)]["time"]
+        return int(t.timestamp()) if hasattr(t, "timestamp") else int(t)
     # 範囲外（未来バー）は最終バーから等間隔で推定
     last_idx = n - 1
-    last_time = int(df.iloc[-1]["time"])
-    bar_dur = int(df.iloc[-1]["time"] - df.iloc[-2]["time"]) if n >= 2 else 900
+    last_t = df.iloc[-1]["time"]
+    last_time = int(last_t.timestamp()) if hasattr(last_t, "timestamp") else int(last_t)
+    if n >= 2:
+        prev_t = df.iloc[-2]["time"]
+        prev_time = int(prev_t.timestamp()) if hasattr(prev_t, "timestamp") else int(prev_t)
+        bar_dur = last_time - prev_time
+    else:
+        bar_dur = 900
     return int(last_time + (bar_index - last_idx) * bar_dur)
 
 

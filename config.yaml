@@ -23,7 +23,7 @@ pairs:
     category: "fx"
     pip_size: 0.01
   - tv_symbol: "OANDA:XAUUSD"
-    mt5_symbol: "XAUUSD"
+    mt5_symbol: "GOLD"
     pair_name: "XAUUSD"
     category: "gold"
     pip_size: 0.01

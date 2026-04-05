@@ -36,7 +36,7 @@ Respond ONLY with the JSON object, no markdown, no extra text.
 class AIScorer:
     """GPT-5-mini を使ってパターン品質を 0-100 で採点するクライアント。"""
 
-    def __init__(self, api_key: str, model: str = "gpt-4o-mini"):
+    def __init__(self, api_key: str, model: str = "gpt-5-mini"):
         try:
             from openai import AsyncOpenAI
             self._client = AsyncOpenAI(api_key=api_key)
@@ -77,8 +77,7 @@ class AIScorer:
                     {"role": "system", "content": _SYSTEM_PROMPT},
                     {"role": "user", "content": user_msg},
                 ],
-                temperature=0.1,
-                max_tokens=120,
+                max_completion_tokens=120,
                 response_format={"type": "json_object"},
             )
             raw = resp.choices[0].message.content or "{}"

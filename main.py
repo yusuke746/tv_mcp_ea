@@ -71,7 +71,7 @@ class TVMcpEA:
         self._detector = BreakoutDetector(
             ai_scorer=self._scorer,
             webhook_url=sys_cfg["fx_system_webhook_url"],
-            webhook_token=os.environ.get("WEBHOOK_TOKEN", ""),
+            webhook_token=os.environ.get("WEBHOOK_SECRET", os.environ.get("WEBHOOK_TOKEN", "")),
             score_threshold=int(brk_cfg["score_threshold"]),
             cooldown_seconds=int(brk_cfg["cooldown_seconds"]),
             volume_surge_ratio=float(brk_cfg["volume_surge_ratio"]),
@@ -110,10 +110,11 @@ class TVMcpEA:
         # 起動直後に 1 回スキャン
         await self._scan_job()
 
-        # 終了シグナル処理
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
+        # 終了シグナル処理（Windows は add_signal_handler 非対応なので try/except）
+        if sys.platform != "win32":
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
 
         logger.info("TV MCP EA running. Press Ctrl+C to stop.")
         try:
@@ -278,6 +279,19 @@ def main() -> None:
         retention="14 days",
         level="DEBUG",
     )
+
+    # 標準 logging → loguru 転送（chart_manager, ai_scorer 等）
+    import logging
+
+    class _InterceptHandler(logging.Handler):
+        def emit(self, record):
+            try:
+                level = logger.level(record.levelname).name
+            except ValueError:
+                level = record.levelno
+            logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+
+    logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
 
     ea = TVMcpEA(cfg)
     asyncio.run(ea.start())
