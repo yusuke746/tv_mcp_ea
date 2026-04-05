@@ -87,17 +87,44 @@ class AlertManager:
             logger.debug(f"{mt5_symbol}: no alert levels to set")
             return 0
 
+        # ── 既存アラートの価格を収集（重複スキップ用） ─────────
+        existing_prices: set[float] = set()
+        try:
+            existing = await self._cdp.list_alerts()
+            sym_short = tv_symbol.split(":")[-1]
+            for a in existing:
+                sym_a = a.get("symbol", "")
+                if tv_symbol in sym_a or sym_short in sym_a:
+                    p = a.get("price", 0)
+                    if p:
+                        existing_prices.add(round(float(p), 2))
+        except CDPError:
+            pass
+
         # ── 新アラート作成 ──────────────────────────────────
         created_ids: list[str] = []
         for level in candidates[: self._max_per_sym]:
+            price_rounded = round(level["price"], 2)
+            if price_rounded in existing_prices:
+                logger.debug(f"Alert already exists: {mt5_symbol} @ {level['price']:.5f} — skip")
+                continue
             msg = self._build_message(mt5_symbol, level, atr)
             try:
-                ok = await self._cdp.create_price_alert_ui(
+                # REST API で確実にメッセージ付きで作成
+                ok = await self._cdp.create_price_alert_api(
+                    tv_symbol=tv_symbol,
                     price=level["price"],
                     message=msg,
                 )
+                if not ok:
+                    # フォールバック: UI操作
+                    ok = await self._cdp.create_price_alert_ui(
+                        price=level["price"],
+                        message=msg,
+                    )
                 if ok:
                     created_ids.append(f"{mt5_symbol}_{level['price']:.5f}")
+                    existing_prices.add(price_rounded)
                     logger.info(
                         f"Alert set: {mt5_symbol} {level['direction']} "
                         f"@ {level['price']:.5f} ({level['pattern']})"
@@ -138,10 +165,14 @@ class AlertManager:
             return 0
 
         deleted = 0
+        sym_short = tv_symbol.split(":")[-1]
         for alert in all_alerts:
             msg = alert.get("message", "")
             sym = alert.get("symbol", "")
-            if _TAG in msg and (tv_symbol in sym or tv_symbol.split(":")[-1] in sym):
+            is_our_symbol = tv_symbol in sym or sym_short in sym
+            # [MCP-EA] タグ付き、またはメッセージ未設定（UI作成失敗の残骸）を削除
+            is_mcp_alert = _TAG in msg or (not msg and is_our_symbol)
+            if is_our_symbol and (_TAG in msg or not msg):
                 aid = alert.get("alert_id")
                 if aid:
                     try:

@@ -247,13 +247,16 @@ class CDPClient:
                     var d = await r.json();
                     if (d.s !== 'ok' || !Array.isArray(d.r)) return [];
                     return d.r.map(function(a) {
-                        var sym = a.symbol || '';
-                        try { sym = JSON.parse(sym.replace(/^=/, '')).symbol || sym; }
+                        var rawSym = a.symbol || '';
+                        var sym = rawSym;
+                        try { sym = JSON.parse(rawSym.replace(/^=/, '')).symbol || rawSym; }
                         catch(e) {}
                         return {
                             alert_id: a.alert_id,
                             symbol: sym,
+                            raw_symbol: rawSym,
                             message: a.message || '',
+                            price: a.price || 0,
                             active: a.active,
                             last_fired: a.last_fire_time || 0,
                             created: a.create_time || 0
@@ -285,12 +288,45 @@ class CDPClient:
         """, timeout=10)
         return bool(result)
 
+    async def create_price_alert_api(self, tv_symbol: str, price: float, message: str) -> bool:
+        """
+        REST API 経由で TV 価格アラートを作成する（UIより高速・確実）。
+        メッセージが確実に設定されるため [MCP-EA] タグによる削除が機能する。
+        """
+        sym_json = json.dumps({"symbol": tv_symbol, "adjustment": "splits"})
+        name = f"{tv_symbol.split(':')[-1]} MCP @ {price:.2f}"
+        result = await self.evaluate(
+            f"""
+            (async function() {{
+                try {{
+                    var params = new URLSearchParams();
+                    params.set('symbol', '=' + {json.dumps(sym_json)});
+                    params.set('condition', JSON.stringify({{type:'crossing',value:{price}}}));
+                    params.set('price', String({price}));
+                    params.set('name', {json.dumps(name)});
+                    params.set('message', {json.dumps(message)});
+                    params.set('expiration_time', '0');
+                    params.set('auto_deactivate', 'false');
+                    var r = await fetch('https://pricealerts.tradingview.com/create_alert', {{
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
+                        body: params.toString()
+                    }});
+                    var d = await r.json();
+                    return (d.s === 'ok') ? (d.r || true) : false;
+                }} catch(e) {{ return false; }}
+            }})()
+            """,
+            timeout=10,
+        )
+        return bool(result)
+
     async def create_price_alert_ui(self, price: float, message: str) -> bool:
         """
-        TV のアラート作成ダイアログを操作して価格アラートを作成する。
-
-        ダイアログ操作のため逐次実行（1アラートあたり約2秒）。
+        TV のアラート作成ダイアログを操作して価格アラートを作成する（フォールバック用）。
         """
+        # ── Step 1: ダイアログを開く ──
         # ── Step 1: ダイアログを開く ──
         opened = await self.evaluate("""
             (function() {
