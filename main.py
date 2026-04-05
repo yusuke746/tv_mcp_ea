@@ -265,7 +265,7 @@ class TVMcpEA:
                     atr=ohlcv_15m.atr14,
                 )
                 logger.debug(f"{mt5_sym}: {n_alerts} TV alerts updated")
-            except CDPError as e:
+            except Exception as e:
                 logger.warning(f"Alert update failed: {e}")
 
         # ─── ブレイクアウト検出 & webhook POST ─────────────────────────────

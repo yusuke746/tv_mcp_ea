@@ -110,18 +110,12 @@ class AlertManager:
                 continue
             msg = self._build_message(mt5_symbol, level, atr)
             try:
-                # REST API で確実にメッセージ付きで作成
+                # REST API で確実にメッセージ付きで作成（asyncio.sleep なし）
                 ok = await self._cdp.create_price_alert_api(
                     tv_symbol=tv_symbol,
                     price=level["price"],
                     message=msg,
                 )
-                if not ok:
-                    # フォールバック: UI操作
-                    ok = await self._cdp.create_price_alert_ui(
-                        price=level["price"],
-                        message=msg,
-                    )
                 if ok:
                     created_ids.append(f"{mt5_symbol}_{level['price']:.5f}")
                     existing_prices.add(price_rounded)
@@ -130,7 +124,7 @@ class AlertManager:
                         f"@ {level['price']:.5f} ({level['pattern']})"
                     )
                 else:
-                    logger.warning(f"Alert creation may have failed: {mt5_symbol} @ {level['price']}")
+                    logger.warning(f"Alert creation failed (REST API): {mt5_symbol} @ {level['price']}")
             except CDPError as e:
                 logger.warning(f"Alert creation failed: {e}")
 
