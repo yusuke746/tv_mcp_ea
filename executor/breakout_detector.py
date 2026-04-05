@@ -83,6 +83,7 @@ class BreakoutDetector:
         sr_levels: list[SRLevel],
         triangles: list[Triangle],
         channels: list[Channel],
+        indicators: dict | None = None,
     ) -> list[BreakoutSignal]:
         """
         全パターンをスキャンし、閾値超えシグナルを webhook POST して返す。
@@ -158,6 +159,8 @@ class BreakoutDetector:
             fired.append(sig)
 
         # ─── S/R レベル ─────────────────────────────────────────────────────
+        # インジケータ辞書を保持（_post_webhook で使う）
+        self._current_indicators = indicators or {}
         for lvl in sr_levels:
             pd_data = {
                 "pattern_type": "sr_level",
@@ -245,6 +248,9 @@ class BreakoutDetector:
             "signal_source":   "mcp",
             "webhook_token":   self._webhook_token,
         }
+        # LightGBM 特徴量をペイロードに追加
+        if hasattr(self, '_current_indicators') and self._current_indicators:
+            payload["indicators"] = self._current_indicators
         logger.info(f"POST webhook: {sig.symbol} {sig.direction} score={sig.breakout_score}")
         try:
             async with aiohttp.ClientSession() as session:

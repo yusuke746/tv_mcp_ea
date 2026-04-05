@@ -230,3 +230,227 @@ class CDPClient:
             f"{api}.getAllShapes().map(function(s){{return s.id;}})"
         )
         return result or []
+
+    # ------------------------------------------------------------------ #
+    #  アラート API (TradingView pricealerts REST)
+    # ------------------------------------------------------------------ #
+
+    async def list_alerts(self) -> list[dict]:
+        """TradingView の pricealerts API から全アラートを取得する。"""
+        result = await self.evaluate("""
+            (async function() {
+                try {
+                    var r = await fetch(
+                        'https://pricealerts.tradingview.com/list_alerts',
+                        {credentials: 'include'}
+                    );
+                    var d = await r.json();
+                    if (d.s !== 'ok' || !Array.isArray(d.r)) return [];
+                    return d.r.map(function(a) {
+                        var sym = a.symbol || '';
+                        try { sym = JSON.parse(sym.replace(/^=/, '')).symbol || sym; }
+                        catch(e) {}
+                        return {
+                            alert_id: a.alert_id,
+                            symbol: sym,
+                            message: a.message || '',
+                            active: a.active,
+                            last_fired: a.last_fire_time || 0,
+                            created: a.create_time || 0
+                        };
+                    });
+                } catch(e) { return []; }
+            })()
+        """, timeout=15)
+        return result or []
+
+    async def delete_alert(self, alert_id) -> bool:
+        """指定 alert_id のアラートを削除する。"""
+        result = await self.evaluate(f"""
+            (async function() {{
+                try {{
+                    var r = await fetch(
+                        'https://pricealerts.tradingview.com/delete_alert',
+                        {{
+                            method: 'POST',
+                            credentials: 'include',
+                            headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
+                            body: 'alert_id={alert_id}'
+                        }}
+                    );
+                    var d = await r.json();
+                    return d.s === 'ok';
+                }} catch(e) {{ return false; }}
+            }})()
+        """, timeout=10)
+        return bool(result)
+
+    async def create_price_alert_ui(self, price: float, message: str) -> bool:
+        """
+        TV のアラート作成ダイアログを操作して価格アラートを作成する。
+
+        ダイアログ操作のため逐次実行（1アラートあたり約2秒）。
+        """
+        # ── Step 1: ダイアログを開く ──
+        opened = await self.evaluate("""
+            (function() {
+                var btn = document.querySelector('[aria-label="Create Alert"]')
+                    || document.querySelector('[data-name="alerts"]');
+                if (btn) { btn.click(); return true; }
+                return false;
+            })()
+        """)
+        if not opened:
+            # Alt+A ショートカット
+            await self._send("Input.dispatchKeyEvent", {
+                "type": "keyDown", "modifiers": 1,
+                "key": "a", "code": "KeyA", "windowsVirtualKeyCode": 65,
+            })
+            await self._send("Input.dispatchKeyEvent", {
+                "type": "keyUp", "key": "a", "code": "KeyA",
+            })
+
+        await asyncio.sleep(1.0)
+
+        # ── Step 2: 価格を入力 ──
+        await self.evaluate(f"""
+            (function() {{
+                var inputs = document.querySelectorAll(
+                    '[class*="alert"] input[type="text"], '
+                    + '[class*="alert"] input[type="number"]');
+                for (var i = 0; i < inputs.length; i++) {{
+                    var label = inputs[i].closest('[class*="row"]')
+                        ?.querySelector('[class*="label"]');
+                    if (label && /value|price/i.test(label.textContent)) {{
+                        var ns = Object.getOwnPropertyDescriptor(
+                            HTMLInputElement.prototype, 'value').set;
+                        ns.call(inputs[i], '{price}');
+                        inputs[i].dispatchEvent(new Event('input', {{bubbles:true}}));
+                        inputs[i].dispatchEvent(new Event('change', {{bubbles:true}}));
+                        return true;
+                    }}
+                }}
+                if (inputs.length > 0) {{
+                    var ns = Object.getOwnPropertyDescriptor(
+                        HTMLInputElement.prototype, 'value').set;
+                    ns.call(inputs[0], '{price}');
+                    inputs[0].dispatchEvent(new Event('input', {{bubbles:true}}));
+                }}
+                return false;
+            }})()
+        """)
+
+        # ── Step 3: メッセージを入力 ──
+        msg_js = json.dumps(message)
+        await self.evaluate(f"""
+            (function() {{
+                var ta = document.querySelector('[class*="alert"] textarea')
+                    || document.querySelector('textarea[placeholder*="message"]');
+                if (ta) {{
+                    var ns = Object.getOwnPropertyDescriptor(
+                        HTMLTextAreaElement.prototype, 'value').set;
+                    ns.call(ta, {msg_js});
+                    ta.dispatchEvent(new Event('input', {{bubbles:true}}));
+                }}
+            }})()
+        """)
+
+        await asyncio.sleep(0.5)
+
+        # ── Step 4: Create ボタンをクリック ──
+        created = await self.evaluate("""
+            (function() {
+                var btns = document.querySelectorAll(
+                    'button[data-name="submit"], button');
+                for (var i = 0; i < btns.length; i++) {
+                    if (/^create$/i.test(btns[i].textContent.trim())) {
+                        btns[i].click(); return true;
+                    }
+                }
+                return false;
+            })()
+        """)
+
+        await asyncio.sleep(0.5)
+        return bool(created)
+
+    # ------------------------------------------------------------------ #
+    #  Pine Script グラフィックス読み取り
+    # ------------------------------------------------------------------ #
+
+    async def get_pine_table(self, study_filter: str = "") -> list[dict]:
+        """
+        チャート上の Pine indicator が table.new() で出力したセルデータを読み取る。
+
+        MCP Server の data_get_pine_tables と同一の JS ロジックを使用。
+
+        Args:
+            study_filter: インジケーター名の部分一致フィルタ (例: "SMC Features")
+
+        Returns:
+            [{"name": "Study Name", "tables": [{"rows": ["col1 | col2", ...]}]}]
+        """
+        js = f"""
+        (function() {{
+          var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
+          var model = chart.model();
+          var sources = model.model().dataSources();
+          var results = [];
+          var filter = '{study_filter}';
+          for (var si = 0; si < sources.length; si++) {{
+            var s = sources[si];
+            if (!s.metaInfo) continue;
+            try {{
+              var meta = s.metaInfo();
+              var name = meta.description || meta.shortDescription || '';
+              if (!name) continue;
+              if (filter && name.indexOf(filter) === -1) continue;
+              var g = s._graphics;
+              if (!g || !g._primitivesCollection) continue;
+              var pc = g._primitivesCollection;
+              var items = [];
+              try {{
+                var outer = pc.dwgtablecells;
+                if (outer) {{
+                  var inner = outer.get('tableCells');
+                  if (inner) {{
+                    var coll = inner.get(false);
+                    if (coll && coll._primitivesDataById && coll._primitivesDataById.size > 0) {{
+                      coll._primitivesDataById.forEach(function(v, id) {{ items.push({{id: id, raw: v}}); }});
+                    }}
+                  }}
+                }}
+              }} catch(e) {{}}
+              if (items.length > 0) results.push({{name: name, count: items.length, items: items}});
+            }} catch(e) {{}}
+          }}
+          return results;
+        }})()
+        """
+        raw = await self.evaluate(js, timeout=15)
+        if not raw:
+            return []
+
+        studies = []
+        for s in raw:
+            tables: dict[int, dict[int, dict[int, str]]] = {}
+            for item in s.get("items", []):
+                v = item.get("raw", {})
+                tid = v.get("tid", 0)
+                row = v.get("row", 0)
+                col = v.get("col", 0)
+                text = v.get("t", "")
+                tables.setdefault(tid, {}).setdefault(row, {})[col] = text
+
+            table_list = []
+            for _tid, rows in sorted(tables.items()):
+                formatted = []
+                for rn in sorted(rows.keys()):
+                    cols = rows[rn]
+                    line = " | ".join(cols[cn] for cn in sorted(cols.keys()) if cols[cn])
+                    if line:
+                        formatted.append(line)
+                table_list.append({"rows": formatted})
+            studies.append({"name": s.get("name", ""), "tables": table_list})
+
+        return studies

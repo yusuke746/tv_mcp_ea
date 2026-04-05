@@ -6,6 +6,10 @@ system:
   log_level: "INFO"
   state_file: "state/drawing_state.json"
 
+alerts:
+  enabled: true                        # TV アラートの自動設定
+  max_per_symbol: 4                    # シンボルごとの最大アラート数
+
 pairs:
   - tv_symbol: "OANDA:USDJPY"
     mt5_symbol: "USDJPY"

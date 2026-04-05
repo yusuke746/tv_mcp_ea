@@ -27,8 +27,12 @@ from cdp_client import CDPClient, CDPError
 from data_feed import DataFeed
 from detection import find_swings, find_sr_levels, filter_sr_near_price, find_triangles, find_channels
 from analysis.ai_scorer import AIScorer
+from analysis.indicators import compute_indicators
+from analysis.pine_features import read_pine_features
 from drawing.chart_manager import ChartManager
+from drawing.alert_manager import AlertManager
 from executor.breakout_detector import BreakoutDetector, BreakoutSignal
+from executor.context_sender import ContextSender
 
 # ─── 定数 ────────────────────────────────────────────────────────────────────
 
@@ -77,6 +81,20 @@ class TVMcpEA:
             volume_surge_ratio=float(brk_cfg["volume_surge_ratio"]),
             body_ratio_min=float(brk_cfg["body_ratio_min"]),
         )
+
+        # Market Context 送信器（エグジット支援用）
+        self._context_sender = ContextSender(
+            webhook_url=sys_cfg["fx_system_webhook_url"],
+            webhook_token=os.environ.get("WEBHOOK_SECRET", os.environ.get("WEBHOOK_TOKEN", "")),
+        )
+
+        # アラート管理（TV アラート設定 + 削除）
+        alert_cfg = cfg.get("alerts", {})
+        self._alert_mgr = AlertManager(
+            cdp=self._cdp,
+            max_alerts_per_symbol=int(alert_cfg.get("max_per_symbol", 4)),
+        )
+        self._alerts_enabled = bool(alert_cfg.get("enabled", True))
 
         # スケジューラ
         self._scheduler = AsyncIOScheduler()
@@ -234,6 +252,22 @@ class TVMcpEA:
                 logger.warning(f"CDP drawing failed: {e} — reconnecting next cycle")
                 self._cdp_connected = False
 
+        # ─── TV アラート更新（古いアラート削除 → 新アラート設定）────────────
+        if self._cdp_connected and self._alerts_enabled:
+            try:
+                n_alerts = await self._alert_mgr.update_alerts(
+                    tv_symbol=tv_sym,
+                    mt5_symbol=mt5_sym,
+                    sr_levels=sr_levels,
+                    triangles=triangles,
+                    channels=channels,
+                    current_price=current_price,
+                    atr=ohlcv_15m.atr14,
+                )
+                logger.debug(f"{mt5_sym}: {n_alerts} TV alerts updated")
+            except CDPError as e:
+                logger.warning(f"Alert update failed: {e}")
+
         # ─── ブレイクアウト検出 & webhook POST ─────────────────────────────
         if ohlcv_1h is None:
             logger.warning(f"1H data unavailable for {mt5_sym}, HTF bias skipped")
@@ -243,6 +277,31 @@ class TVMcpEA:
         else:
             ohlcv_1h_safe = ohlcv_1h
 
+        # 4H データ取得（LightGBM 特徴量用）
+        ohlcv_4h = self._data_feed.get_ohlcv(
+            mt5_sym, det_cfg.get("timeframe_htf", "H4"), int(det_cfg.get("bars_htf", 60))
+        )
+        df_4h = ohlcv_4h.bars if ohlcv_4h is not None and len(ohlcv_4h.bars) > 0 else None
+
+        # テクニカル指標計算: Pine テーブル優先 → Python 近似フォールバック
+        indicators = None
+        if self._cdp and self._cdp._ws:
+            try:
+                indicators = await read_pine_features(self._cdp)
+                if indicators:
+                    logger.debug(f"{mt5_sym}: Pine features read ({len(indicators)} keys)")
+            except Exception as e:
+                logger.debug(f"{mt5_sym}: Pine features unavailable: {e}")
+
+        if indicators is None:
+            indicators = compute_indicators(
+                df_15m=df,
+                df_1h=ohlcv_1h_safe.bars if ohlcv_1h_safe and len(ohlcv_1h_safe.bars) > 0 else None,
+                df_4h=df_4h,
+                atr_14=ohlcv_15m.atr14,
+            )
+            logger.debug(f"{mt5_sym}: Using Python indicator fallback")
+
         fired = await self._detector.detect_and_fire(
             tv_symbol=tv_sym,
             mt5_symbol=mt5_sym,
@@ -251,10 +310,22 @@ class TVMcpEA:
             sr_levels=sr_levels,
             triangles=triangles,
             channels=channels,
+            indicators=indicators,
         )
 
         if fired:
             logger.info(f"{mt5_sym}: {len(fired)} breakout signal(s) fired")
+
+        # ─── Market Context 送信（エグジット支援）──────────────────────────
+        ctx = self._context_sender.build_context(
+            mt5_symbol=mt5_sym,
+            current_price=current_price,
+            ohlcv_15m=ohlcv_15m,
+            ohlcv_1h=ohlcv_1h_safe,
+            sr_levels=sr_levels,
+            swings=swings,
+        )
+        await self._context_sender.send(ctx)
 
 
 # ─── エントリーポイント ────────────────────────────────────────────────────────

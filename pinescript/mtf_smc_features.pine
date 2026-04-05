@@ -1,0 +1,454 @@
+// =====================================================
+// SMC Features Export v1.0 — LightGBM 特徴量テーブル出力
+// =====================================================
+// mtf_smc_v2_3.pine と完全同一のロジックで 30 特徴量を計算し、
+// table.new() で MCP/CDP から読み取り可能なテーブルに出力する。
+//
+// ■ 使い方
+//   1. TradingView 15分足チャートに **インジケーター** として追加
+//   2. tv_mcp_ea が get_pine_table(study_filter="SMC Features") で読み取り
+//   3. mtf_smc_v2_3 と併用可能（こちらはアラート無し、テーブル出力専用）
+//
+// ■ テーブル構造 (2列 × 30行)
+//   col0 = 特徴量名, col1 = 値（文字列）
+// =====================================================
+
+//@version=5
+indicator("SMC Features", overlay=true, max_labels_count=1)
+
+// ── 入力パラメータ（mtf_smc_v2_3 と同一デフォルト値）──────────
+i_ema20_len      = input.int(20,           "4H EMA20 期間")
+i_ema50_len      = input.int(50,           "4H EMA50 期間")
+i_atr_len        = input.int(14,           "ATR期間")
+i_atr_avg        = input.int(20,           "ATR平均化日数")
+i_rsi_len        = input.int(14,           "RSI期間")
+i_rsi_ob         = input.float(65.0,       "RSI 買われすぎ")
+i_rsi_os         = input.float(35.0,       "RSI 売られすぎ")
+i_macd_fast      = input.int(12,           "MACD Fast")
+i_macd_slow      = input.int(26,           "MACD Slow")
+i_macd_sig       = input.int(9,            "MACD Signal")
+i_bb_len         = input.int(20,           "BB期間")
+i_bb_mult        = input.float(2.0,        "BB乗数")
+i_swing_lookback = input.int(5,            "Swing ルックバック (1H)")
+i_swing_15m      = input.int(3,            "Swing ルックバック (15M)")
+i_sweep_min_str  = input.float(0.3,        "Sweep最小強度 ATR倍率")
+i_sweep_timeout  = input.int(8,            "Sweep待機タイムアウト 15Mバー数")
+i_fvg_mit_ratio  = input.float(0.5,        "FVG使用済み閾値 充填率")
+
+
+// =====================================================
+// セクション1: 4時間足データ（方向 / OB / FVG）
+// =====================================================
+
+ema20_4h      = request.security(syminfo.tickerid, "240", ta.ema(close, i_ema20_len))
+ema50_4h      = request.security(syminfo.tickerid, "240", ta.ema(close, i_ema50_len))
+trend_bullish = ema20_4h > ema50_4h
+trend_bearish = ema20_4h < ema50_4h
+
+high_4h   = request.security(syminfo.tickerid, "240", high)
+low_4h    = request.security(syminfo.tickerid, "240", low)
+open_4h   = request.security(syminfo.tickerid, "240", open)
+close_4h  = request.security(syminfo.tickerid, "240", close)
+
+body_4h     = math.abs(close_4h - open_4h)
+avg_body_4h = request.security(syminfo.tickerid, "240", ta.sma(math.abs(close - open), 20))
+is_big_4h   = body_4h > avg_body_4h * 1.5
+is_bull_4h  = close_4h > open_4h
+is_bear_4h  = close_4h < open_4h
+
+prev_high_4h  = request.security(syminfo.tickerid, "240", high[1])
+prev_low_4h   = request.security(syminfo.tickerid, "240", low[1])
+prev_close_4h = request.security(syminfo.tickerid, "240", close[1])
+prev_open_4h  = request.security(syminfo.tickerid, "240", open[1])
+
+pip_unit_zone = str.contains(str.upper(syminfo.ticker), "XAU") ? 0.10 :
+     str.contains(str.upper(syminfo.ticker), "XAG") ? 0.010 :
+     syminfo.currency == "JPY" ? 0.01 : 0.0001
+
+// ── 4H Order Block + OBミティゲーション ─────────────
+var float ob_4h_top    = na
+var float ob_4h_bottom = na
+var bool  ob_4h_bull   = false
+var bool  ob_4h_bear   = false
+var bool  ob_4h_valid  = false
+
+if is_big_4h and is_bull_4h and prev_close_4h < prev_open_4h
+    ob_4h_top    := prev_high_4h
+    ob_4h_bottom := prev_low_4h
+    ob_4h_bull   := true
+    ob_4h_bear   := false
+    ob_4h_valid  := true
+
+if is_big_4h and is_bear_4h and prev_close_4h > prev_open_4h
+    ob_4h_top    := prev_high_4h
+    ob_4h_bottom := prev_low_4h
+    ob_4h_bull   := false
+    ob_4h_bear   := true
+    ob_4h_valid  := true
+
+ob_4h_mid = na(ob_4h_top) ? na : (ob_4h_top + ob_4h_bottom) / 2.0
+if ob_4h_valid and not na(ob_4h_mid)
+    if ob_4h_bull and close < ob_4h_mid
+        ob_4h_valid := false
+    if ob_4h_bear and close > ob_4h_mid
+        ob_4h_valid := false
+
+ob_4h_zone_active = ob_4h_valid and not na(ob_4h_top) and
+     close >= ob_4h_bottom and close <= ob_4h_top
+ob_4h_size_pips = (ob_4h_valid and not na(ob_4h_top) and not na(ob_4h_bottom)) ? math.abs(ob_4h_top - ob_4h_bottom) / pip_unit_zone : 0.0
+
+// ── 4H FVG + FVGミティゲーション ──────────────────────
+high_4h_2 = request.security(syminfo.tickerid, "240", high[2])
+low_4h_2  = request.security(syminfo.tickerid, "240", low[2])
+
+var float fvg_4h_top    = na
+var float fvg_4h_bottom = na
+var bool  fvg_4h_valid  = false
+var bool  fvg_4h_is_bull = false
+
+bullish_fvg_4h = low_4h > high_4h_2
+bearish_fvg_4h = high_4h < low_4h_2
+
+if bullish_fvg_4h
+    fvg_4h_top     := low_4h
+    fvg_4h_bottom  := high_4h_2
+    fvg_4h_valid   := true
+    fvg_4h_is_bull := true
+
+if bearish_fvg_4h
+    fvg_4h_top     := low_4h_2
+    fvg_4h_bottom  := high_4h
+    fvg_4h_valid   := true
+    fvg_4h_is_bull := false
+
+if fvg_4h_valid and not na(fvg_4h_top) and (fvg_4h_top - fvg_4h_bottom) > 0
+    _fvg_range = fvg_4h_top - fvg_4h_bottom
+    if fvg_4h_is_bull
+        _fill = (fvg_4h_top - close) / _fvg_range
+        if _fill >= i_fvg_mit_ratio
+            fvg_4h_valid := false
+    else
+        _fill = (close - fvg_4h_bottom) / _fvg_range
+        if _fill >= i_fvg_mit_ratio
+            fvg_4h_valid := false
+
+fvg_4h_zone_active = fvg_4h_valid and not na(fvg_4h_top) and
+     close >= fvg_4h_bottom and close <= fvg_4h_top
+fvg_4h_fill_ratio = fvg_4h_zone_active and (fvg_4h_top - fvg_4h_bottom) > 0 ?
+     (close - fvg_4h_bottom) / (fvg_4h_top - fvg_4h_bottom) : 0.0
+fvg_4h_size_pips = (fvg_4h_valid and not na(fvg_4h_top) and not na(fvg_4h_bottom)) ? math.abs(fvg_4h_top - fvg_4h_bottom) / pip_unit_zone : 0.0
+
+
+// =====================================================
+// セクション2: 1時間足データ（Sweep / BOS / ChoCH）
+// =====================================================
+
+high_1h  = request.security(syminfo.tickerid, "60", high)
+low_1h   = request.security(syminfo.tickerid, "60", low)
+close_1h = request.security(syminfo.tickerid, "60", close)
+
+swing_high_1h = request.security(syminfo.tickerid, "60",
+     ta.pivothigh(high, i_swing_lookback, i_swing_lookback))
+swing_low_1h  = request.security(syminfo.tickerid, "60",
+     ta.pivotlow(low, i_swing_lookback, i_swing_lookback))
+
+var float last_swing_high_1h = na
+var float last_swing_low_1h  = na
+
+if not na(swing_high_1h)
+    last_swing_high_1h := swing_high_1h
+if not na(swing_low_1h)
+    last_swing_low_1h := swing_low_1h
+
+// ── 1H Liquidity Sweep ───────────────
+var bool  liq_sweep_bull_1h = false
+var bool  liq_sweep_bear_1h = false
+var float sweep_strength    = 0.0
+
+atr_1h = request.security(syminfo.tickerid, "60", ta.atr(i_atr_len))
+
+if not na(last_swing_low_1h) and low_1h < last_swing_low_1h and close_1h > last_swing_low_1h
+    liq_sweep_bull_1h := true
+    sweep_strength    := nz(atr_1h) > 0 ?
+         math.abs(low_1h - last_swing_low_1h) / atr_1h : 0.0
+else
+    liq_sweep_bull_1h := false
+
+if not na(last_swing_high_1h) and high_1h > last_swing_high_1h and close_1h < last_swing_high_1h
+    liq_sweep_bear_1h := true
+    sweep_strength    := nz(atr_1h) > 0 ?
+         math.abs(high_1h - last_swing_high_1h) / atr_1h : 0.0
+else
+    liq_sweep_bear_1h := false
+
+liq_sweep_1h       = liq_sweep_bull_1h or liq_sweep_bear_1h
+liq_sweep_qualified = liq_sweep_1h and sweep_strength >= i_sweep_min_str
+sweep_depth_atr_ratio = liq_sweep_bull_1h ? sweep_strength : liq_sweep_bear_1h ? -sweep_strength : 0.0
+
+// ── 1H BOS ──────────────────────────────────
+var bool bos_1h_bull = false
+var bool bos_1h_bear = false
+
+if not na(last_swing_high_1h) and close_1h > last_swing_high_1h
+    bos_1h_bull := true
+else
+    bos_1h_bull := false
+
+if not na(last_swing_low_1h) and close_1h < last_swing_low_1h
+    bos_1h_bear := true
+else
+    bos_1h_bear := false
+
+bos_1h = bos_1h_bull or bos_1h_bear
+
+// ── 1H ChoCH ─────────────────────────
+var int last_bos_dir = 0
+
+choch_1h_bull = bos_1h_bull and last_bos_dir[1] == -1
+choch_1h_bear = bos_1h_bear and last_bos_dir[1] == 1
+choch_1h      = choch_1h_bull or choch_1h_bear
+
+if bos_1h_bull
+    last_bos_dir := 1
+if bos_1h_bear
+    last_bos_dir := -1
+
+
+// =====================================================
+// セクション3: 15分足インジケーター + Sweep→MSBステートマシン
+// =====================================================
+// ※ request.security("15", ...) で15M固定 — チャート時間足に依存しない
+
+pip_unit = str.contains(str.upper(syminfo.ticker), "XAU") ? 0.10 :
+     str.contains(str.upper(syminfo.ticker), "XAG") ? 0.010 :
+     syminfo.currency == "JPY" ? 0.01 : 0.0001
+
+// ── 15M ATR ─────────────────────────────────────────
+[atr_14, atr_avg_20] = request.security(syminfo.tickerid, "15",
+     [ta.atr(i_atr_len), ta.sma(ta.atr(i_atr_len), i_atr_avg * 4)])
+atr_ratio = nz(atr_avg_20) > 0 ? atr_14 / atr_avg_20 : 1.0
+
+// ── 15M BB ──────────────────────────────────────────
+[bb_mid, bb_upper, bb_lower] = request.security(syminfo.tickerid, "15",
+     ta.bb(close, i_bb_len, i_bb_mult))
+bb_width = (bb_upper - bb_lower) / bb_mid * 100
+
+// ── 15M RSI ─────────────────────────────────────────
+rsi_14 = request.security(syminfo.tickerid, "15", ta.rsi(close, i_rsi_len))
+rsi_oversold   = rsi_14 >= 30 and rsi_14 <= i_rsi_os
+rsi_overbought = rsi_14 >= i_rsi_ob and rsi_14 <= 70
+rsi_zone       = rsi_oversold ? 1 : rsi_overbought ? -1 : 0
+
+// ── 15M MACD + クロスオーバー ───────────────────────
+f_macd_data() =>
+    [_m, _s, _h] = ta.macd(close, i_macd_fast, i_macd_slow, i_macd_sig)
+    _cu = ta.crossover(_h, 0)
+    _cd = ta.crossunder(_h, 0)
+    _cross = _cu ? 1.0 : (_cd ? -1.0 : 0.0)
+    [_h, _cross]
+
+[macd_hist, _macd_cross_val] = request.security(syminfo.tickerid, "15", f_macd_data())
+macd_cross_up   = _macd_cross_val > 0.5
+macd_cross_down = _macd_cross_val < -0.5
+
+// ── 15M Stochastic ──────────────────────────────────
+f_stoch_data() =>
+    _k = ta.stoch(close, high, low, 14)
+    _d = ta.sma(_k, 3)
+    [_k, _d]
+
+[stoch_k, stoch_d] = request.security(syminfo.tickerid, "15", f_stoch_data())
+
+// ── 15M 価格データ（momentum, range, prior candle）──
+[close_15m, close_15m_3, high_15m, low_15m,
+ close_15m_1, open_15m_1, high_15m_1, low_15m_1] =
+     request.security(syminfo.tickerid, "15",
+     [close, close[3], high, low, close[1], open[1], high[1], low[1]])
+
+momentum_3bar = nz(close_15m_3) > 0 ? (close_15m - close_15m_3) / close_15m_3 * 100 : 0.0
+
+close_vs_ema20_4h = nz(ema20_4h) > 0 ? (close - ema20_4h) / ema20_4h * 100 : 0.0
+close_vs_ema50_4h = nz(ema50_4h) > 0 ? (close - ema50_4h) / ema50_4h * 100 : 0.0
+
+high_low_range_15m = high_15m - low_15m
+
+prior_body              = math.abs(close_15m_1 - open_15m_1)
+prior_range             = high_15m_1 - low_15m_1
+prior_candle_body_ratio = prior_range > 0 ? prior_body / prior_range : 0.5
+
+// ── 15M consecutive_same_dir ────────────────────────
+f_consecutive_dir() =>
+    _dir = close > open ? 1 : (close < open ? -1 : 0)
+    _cnt = 0
+    if _dir != 0
+        _cnt := 1
+        for i = 1 to 10
+            _prev = close[i] > open[i] ? 1 : (close[i] < open[i] ? -1 : 0)
+            if _prev == _dir
+                _cnt += 1
+            else
+                break
+    _cnt
+
+consecutive_same_dir = int(request.security(syminfo.tickerid, "15", f_consecutive_dir()))
+
+ob_4h_distance = (not ob_4h_valid or na(ob_4h_bottom)) ? 0.0 :
+     math.min(math.abs(close - ob_4h_top), math.abs(close - ob_4h_bottom))
+
+// ── 15M Swing High/Low ────────────────────────────────
+swing_high_15m_raw = request.security(syminfo.tickerid, "15",
+     ta.pivothigh(high, i_swing_15m, i_swing_15m))
+swing_low_15m_raw  = request.security(syminfo.tickerid, "15",
+     ta.pivotlow(low, i_swing_15m, i_swing_15m))
+
+var float last_swing_high_15m = na
+var float last_swing_low_15m  = na
+
+if not na(swing_high_15m_raw)
+    last_swing_high_15m := swing_high_15m_raw
+if not na(swing_low_15m_raw)
+    last_swing_low_15m := swing_low_15m_raw
+
+// ── Sweep → 15M MSBステートマシン ──────────────────────────
+sweep_bull_started = liq_sweep_bull_1h and not liq_sweep_bull_1h[1]
+sweep_bear_started = liq_sweep_bear_1h and not liq_sweep_bear_1h[1]
+
+var bool  sweep_bull_pending = false
+var bool  sweep_bear_pending = false
+var int   sweep_pending_bars = 0
+var float msb_ref_high_15m  = na
+var float msb_ref_low_15m   = na
+
+if sweep_bull_started and sweep_strength >= i_sweep_min_str
+    sweep_bull_pending := true
+    sweep_bear_pending := false
+    sweep_pending_bars := 0
+    msb_ref_high_15m  := last_swing_high_15m
+    msb_ref_low_15m   := na
+
+if sweep_bear_started and sweep_strength >= i_sweep_min_str
+    sweep_bear_pending := true
+    sweep_bull_pending := false
+    sweep_pending_bars := 0
+    msb_ref_low_15m   := last_swing_low_15m
+    msb_ref_high_15m  := na
+
+if sweep_bull_pending or sweep_bear_pending
+    sweep_pending_bars += 1
+
+if sweep_pending_bars > i_sweep_timeout
+    sweep_bull_pending := false
+    sweep_bear_pending := false
+    sweep_pending_bars := 0
+    msb_ref_high_15m  := na
+    msb_ref_low_15m   := na
+
+msb_15m_bull = sweep_bull_pending and not na(msb_ref_high_15m) and close > msb_ref_high_15m
+msb_15m_bear = sweep_bear_pending and not na(msb_ref_low_15m)  and close < msb_ref_low_15m
+
+if msb_15m_bull
+    sweep_bull_pending := false
+    sweep_pending_bars := 0
+if msb_15m_bear
+    sweep_bear_pending := false
+    sweep_pending_bars := 0
+
+msb_15m_confirmed = msb_15m_bull or msb_15m_bear
+
+// ── MTF合致スコア（最大5点）──────────────
+mtf_confluence = 0
+if ob_4h_zone_active
+    mtf_confluence += 1
+if fvg_4h_zone_active
+    mtf_confluence += 1
+if liq_sweep_qualified
+    mtf_confluence += 1
+if choch_1h
+    mtf_confluence += 1
+else if bos_1h
+    mtf_confluence += 1
+
+// ── Momentum スコア (0〜6) ──────────────
+momentum_long  = (macd_cross_up ? 1 : 0) + (rsi_oversold ? 1 : 0) + (bos_1h_bull ? 1 : 0) + (choch_1h_bull ? 2 : 0) + (msb_15m_bull ? 2 : 0)
+momentum_short = (macd_cross_down ? 1 : 0) + (rsi_overbought ? 1 : 0) + (bos_1h_bear ? 1 : 0) + (choch_1h_bear ? 2 : 0) + (msb_15m_bear ? 2 : 0)
+
+// ── Trend Direction ──────────────
+trend_direction = trend_bullish ? 1 : (trend_bearish ? -1 : 0)
+
+
+// =====================================================
+// セクション4: テーブル出力（2列 × 30行）
+// =====================================================
+
+var table feat_tbl = table.new(position.top_left, 2, 30,
+     bgcolor=color.new(color.black, 100),
+     border_color=color.new(color.gray, 100),
+     border_width=0, frame_color=color.new(color.gray, 100), frame_width=0)
+
+// 最新バーで常にテーブルを更新（リアルタイム反映）
+if barstate.islast
+    // SMCフラグ (8)
+    table.cell(feat_tbl, 0, 0, "fvg_4h_zone_active",   text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 0, str.tostring(fvg_4h_zone_active),   text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 1, "ob_4h_zone_active",    text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 1, str.tostring(ob_4h_zone_active),    text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 2, "liq_sweep_1h",         text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 2, str.tostring(liq_sweep_1h),         text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 3, "liq_sweep_qualified",  text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 3, str.tostring(liq_sweep_qualified),  text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 4, "bos_1h",               text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 4, str.tostring(bos_1h),               text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 5, "choch_1h",             text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 5, str.tostring(choch_1h),             text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 6, "msb_15m_confirmed",    text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 6, str.tostring(msb_15m_confirmed),    text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 7, "mtf_confluence",       text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 7, str.tostring(mtf_confluence),       text_color=color.new(color.white, 100))
+    // 価格・ボラティリティ系 (5)
+    table.cell(feat_tbl, 0, 8, "atr_ratio",            text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 8, str.tostring(math.round(atr_ratio, 4)),            text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 9, "bb_width",             text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 9, str.tostring(math.round(bb_width, 4)),             text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 10, "close_vs_ema20_4h",   text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 10, str.tostring(math.round(close_vs_ema20_4h, 4)),   text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 11, "close_vs_ema50_4h",   text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 11, str.tostring(math.round(close_vs_ema50_4h, 4)),   text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 12, "high_low_range_15m",  text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 12, str.tostring(math.round(high_low_range_15m, 5)),  text_color=color.new(color.white, 100))
+    // トレンド・モメンタム補助 (3)
+    table.cell(feat_tbl, 0, 13, "trend_direction",     text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 13, str.tostring(trend_direction),     text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 14, "momentum_long",       text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 14, str.tostring(momentum_long),       text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 15, "momentum_short",      text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 15, str.tostring(momentum_short),      text_color=color.new(color.white, 100))
+    // モメンタム系 (7)
+    table.cell(feat_tbl, 0, 16, "macd_histogram",      text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 16, str.tostring(math.round(macd_hist, 6)),           text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 17, "macd_signal_cross",   text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 17, str.tostring(macd_cross_up ? 1 : (macd_cross_down ? -1 : 0)),   text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 18, "rsi_14",              text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 18, str.tostring(math.round(rsi_14, 2)),              text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 19, "rsi_zone",            text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 19, str.tostring(rsi_zone),            text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 20, "stoch_k",             text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 20, str.tostring(math.round(stoch_k, 2)),             text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 21, "stoch_d",             text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 21, str.tostring(math.round(stoch_d, 2)),             text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 22, "momentum_3bar",       text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 22, str.tostring(math.round(momentum_3bar, 4)),       text_color=color.new(color.white, 100))
+    // 構造・パターン系 (7)
+    table.cell(feat_tbl, 0, 23, "ob_4h_distance_pips", text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 23, str.tostring(math.round(ob_4h_distance, 4)),      text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 24, "fvg_4h_fill_ratio",   text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 24, str.tostring(math.round(fvg_4h_fill_ratio, 4)),   text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 25, "liq_sweep_strength",  text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 25, str.tostring(math.round(sweep_strength, 4)),      text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 26, "fvg_4h_size_pips",    text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 26, str.tostring(math.round(fvg_4h_size_pips, 1)),    text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 27, "ob_4h_size_pips",     text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 27, str.tostring(math.round(ob_4h_size_pips, 1)),     text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 28, "sweep_depth_atr_ratio",  text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 28, str.tostring(math.round(sweep_depth_atr_ratio, 4)), text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 0, 29, "sweep_pending_bars",  text_color=color.new(color.white, 100))
+    table.cell(feat_tbl, 1, 29, str.tostring(sweep_pending_bars),  text_color=color.new(color.white, 100))

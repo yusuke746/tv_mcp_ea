@@ -61,7 +61,7 @@ MT5 Terminal
 |------|-----:|---|
 | クローズ確認 | +2 | 直近確定足終値がレベルを超えている |
 | 出来高急増 | +2 | 直近足 > 20本平均 × 1.5 |
-| ローソク実体比率 | +1 | `|終値-始値| / (高値-安値) > 0.6` |
+| ローソク実体比率 | +1 | `|終値-始値| / (高値-安値) > 0.50` |
 | HTF バイアス | +2 | 1H EMA20 > EMA50（ロング）or < EMA50（ショート） |
 | AI 品質スコア | +3 | GPT-5-mini スコア ≥75→+3 / ≥55→+2 / ≥40→+1 |
 | **発注閾値** | **≥7** | `config.yaml` の `score_threshold` で変更可 |
@@ -70,12 +70,12 @@ MT5 Terminal
 
 ## 対応ペアと設定
 
-| ペア | カテゴリ | MT5 シンボル | pip_size | TP ATR倍率 | SL ATR倍率 |
-|------|----------|-------------|---------|-----------|-----------|
-| USDJPY | FX | USDJPY | 0.01 | 2.0× | 1.5× |
-| EURUSD | FX | EURUSD | 0.0001 | 2.0× | 1.5× |
-| GBPJPY | FX | GBPJPY | 0.01 | 2.0× | 1.5× |
-| XAUUSD | GOLD | XAUUSD | 0.10 | 2.5× | 2.5× |
+| ペア | カテゴリ | MT5 シンボル | TV シンボル | pip_size | TP ATR倍率 | SL ATR倍率 |
+|------|----------|-------------|------------|---------|-----------|-----------|
+| USDJPY | FX | USDJPY | OANDA:USDJPY | 0.01 | 2.0× | 1.5× |
+| EURUSD | FX | EURUSD | OANDA:EURUSD | 0.0001 | 2.0× | 1.5× |
+| GBPJPY | FX | GBPJPY | OANDA:GBPJPY | 0.01 | 2.0× | 1.5× |
+| XAUUSD | GOLD | GOLD | OANDA:XAUUSD | 0.10 | 2.5× | 2.5× |
 
 - FX / GOLD 各最大 1 ポジション（合計 2 枠）= 既存 fx_system の Pine 枠（最大 5）とは独立
 - GOLD のロットは FX に対して 50%（`gold_lot_scale: 0.5`）
@@ -94,6 +94,7 @@ tv_mcp_ea/
 ├── analysis/
 │   └── ai_scorer.py           # GPT-5-mini パターン採点
 ├── detection/
+│   ├── __init__.py            # 検出モジュール初期化
 │   ├── swing.py               # スイング高値/安値
 │   ├── sr_levels.py           # S/R レベル
 │   ├── triangle.py            # トライアングル
@@ -128,14 +129,15 @@ pip install -r requirements.txt
 
 ### 3. .env ファイル
 
-`tv_mcp_ea/.env`（または `fx_system/.env` と共用）に以下を設定：
+`tv_mcp_ea/.env`（存在しない場合は `fx_system/.env` を自動フォールバック）に以下を設定：
 
 ```env
 MT5_LOGIN=<ログインID>
 MT5_PASSWORD=<パスワード>
-MT5_SERVER=XMTrading-Demo3    # 本番: XMTrading-Real15 等
+MT5_SERVER=XMTrading-MT5          # デモ: XMTrading-Demo3 等
 OPENAI_API_KEY=sk-...
-WEBHOOK_TOKEN=<fx_system の webhook_secret と同じ値>
+WEBHOOK_SECRET=<fx_system の webhook_secret と同じ値>
+# フォールバック: WEBHOOK_TOKEN も読み込み可
 ```
 
 ### 4. TradingView Desktop 起動
@@ -183,3 +185,35 @@ python main.py
 - ログ: `tv_mcp_ea/logs/tv_mcp_ea_YYYY-MM-DD.log`（14日保持）
 - 描画状態: `tv_mcp_ea/state/drawing_state.json`（シンボル → entity_id リスト）
 - クールダウン: `BreakoutDetector` インスタンス内メモリ管理（再起動でリセット）
+- ロギング: main.py で loguru を使用。chart_manager.py 等の stdlib `logging` は `_InterceptHandler` で loguru にブリッジ
+
+---
+
+## テスト済み動作環境
+
+| 項目 | バージョン / 値 |
+|---|---|
+| Python | 3.13 |
+| TradingView Desktop | 3.0.0.7652 (Microsoft Store 版) |
+| MT5 | XMTrading MT5 (KIWA 極口座) |
+| OpenAI モデル | gpt-5-mini (temperature パラメータ非対応) |
+| CDP ポート | 9222 |
+| fx_system ポート | 8000 |
+
+### 確認済みの動作
+
+- CDP 接続: TradingView Desktop に WebSocket 接続成功
+- 4ペアスキャン: USDJPY(SR=3), EURUSD(SR=2), GBPJPY(SR=1), GOLD(SR=1)
+- GPT-5-mini API: 200 OK レスポンス
+- チャート描画: S/R 水平線が TradingView 上に自動描画される
+- ブレイクアウト判定: スコア 5-6/10（閾値 7 未満のため正しく発注抑制）
+
+---
+
+## 既知の注意事項
+
+- `config.yaml` の `drawing` セクション（色設定）は chart_manager.py で使用されていません（ハードコード値を使用）
+- `detection.timeframe_htf: "H4"` は定義されていますが、main.py では `timeframe_bias` (H1) のみ使用
+- `tp_sl` セクションは tv_mcp_ea 側では参照されず、SL/TP 計算は fx_system 側で実行
+- XMTrading での GOLD シンボル名は `GOLD`（`XAUUSD` ではない）
+- gpt-5-mini は `temperature` パラメータをサポートしていません
