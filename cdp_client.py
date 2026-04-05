@@ -146,6 +146,104 @@ class CDPClient:
     async def _get_chart_api_path(self) -> str:
         return "window.TradingViewApi._activeChartWidgetWV.value()"
 
+    async def get_chart_count(self) -> int:
+        """現在のレイアウト内のチャート数を返す。"""
+        expr = """
+        (function() {
+            try {
+                var api = window.TradingViewApi;
+                if (!api || !api._chartWidgetCollection) return 0;
+                var defs = api._chartWidgetCollection._chartWidgetsDefs;
+                if (Array.isArray(defs)) return defs.length;
+                return 1;
+            } catch (e) {
+                return 0;
+            }
+        })()
+        """
+        try:
+            count = await self.evaluate(expr)
+            return int(count or 0)
+        except CDPError:
+            return 0
+
+    async def list_charts(self) -> list[dict]:
+        """レイアウト内の全チャートの index/symbol を返す。"""
+        expr = """
+        (function() {
+            try {
+                var api = window.TradingViewApi;
+                if (!api || !api._chartWidgetCollection) return [];
+                var defs = api._chartWidgetCollection._chartWidgetsDefs;
+                if (!Array.isArray(defs)) return [];
+                var out = [];
+                for (var i = 0; i < defs.length; i++) {
+                    var chart = defs[i] ? defs[i].chartWidget : null;
+                    var symbol = '';
+                    try {
+                        if (chart && chart._symbolWV && typeof chart._symbolWV.value === 'function') {
+                            symbol = chart._symbolWV.value() || '';
+                        }
+                    } catch (e) {}
+                    out.push({index: i, symbol: symbol});
+                }
+                return out;
+            } catch (e) {
+                return [];
+            }
+        })()
+        """
+        result = await self.evaluate(expr, timeout=8)
+        return result or []
+
+    async def find_chart_index_by_symbol(self, symbol: str) -> int | None:
+        """指定シンボルを表示しているチャート index を返す。"""
+        charts = await self.list_charts()
+        short_symbol = symbol.split(":")[-1]
+        for item in charts:
+            sym = str(item.get("symbol") or "")
+            if sym == symbol or sym == short_symbol or sym.endswith(short_symbol):
+                return int(item.get("index", 0))
+        return None
+
+    async def set_active_chart(self, chart_index: int, settle_seconds: float = 0.5) -> bool:
+        """マルチチャートレイアウトのアクティブペインを切り替える。"""
+        expr = f"""
+        (async function() {{
+            try {{
+                var idx = {int(chart_index)};
+                var api = window.TradingViewApi;
+                if (!api || !api._chartWidgetCollection) return false;
+                var defs = api._chartWidgetCollection._chartWidgetsDefs;
+                if (!Array.isArray(defs) || idx < 0 || idx >= defs.length) return false;
+                var target = defs[idx] ? defs[idx].chartWidget : null;
+                if (!target) return false;
+
+                try {{
+                    if (target._isActive && typeof target._isActive.value === 'function' && target._isActive.value()) {{
+                        return true;
+                    }}
+                }} catch (e) {{}}
+
+                if (typeof api._activateChart !== 'function') return false;
+                var ret = api._activateChart(target);
+                if (ret && typeof ret.then === 'function') await ret;
+
+                try {{
+                    return !!(target._isActive && typeof target._isActive.value === 'function' && target._isActive.value());
+                }} catch (e) {{
+                    return false;
+                }}
+            }} catch (e) {{
+                return false;
+            }}
+        }})()
+        """
+        ok = bool(await self.evaluate(expr, timeout=max(5.0, settle_seconds + 3.0)))
+        if ok and settle_seconds > 0:
+            await asyncio.sleep(settle_seconds)
+        return ok
+
     async def get_current_symbol(self) -> str | None:
         """現在チャートに表示されているシンボルを返す。"""
         expr = "window.TradingViewApi._activeChartWidgetWV.value().symbol()"
@@ -154,6 +252,57 @@ class CDPClient:
             return str(val) if val else None
         except CDPError:
             return None
+
+    async def set_current_symbol(self, symbol: str, settle_seconds: float = 1.5) -> bool:
+        """現在チャートのシンボルを切り替える。"""
+        symbol_json = json.dumps(symbol)
+        expr = f"""
+        (async function() {{
+            try {{
+                var widget = window.TradingViewApi._activeChartWidgetWV.value();
+                if (!widget) return false;
+                if (widget.symbol && widget.symbol() === {symbol_json}) return true;
+
+                async function setVia(obj) {{
+                    if (!obj || typeof obj.setSymbol !== 'function') return false;
+                    return await new Promise(function(resolve) {{
+                        var settled = false;
+                        function done(ok) {{
+                            if (settled) return;
+                            settled = true;
+                            resolve(ok);
+                        }}
+                        try {{
+                            var ret = obj.setSymbol({symbol_json}, function() {{ done(true); }});
+                            if (ret && typeof ret.then === 'function') {{
+                                ret.then(function() {{ done(true); }}).catch(function() {{ done(false); }});
+                            }}
+                            setTimeout(function() {{
+                                try {{
+                                    done(widget.symbol && widget.symbol() === {symbol_json});
+                                }} catch (e) {{
+                                    done(false);
+                                }}
+                            }}, 1200);
+                        }} catch (e) {{
+                            done(false);
+                        }}
+                    }});
+                }}
+
+                if (await setVia(widget)) return true;
+                if (widget.activeChart && await setVia(widget.activeChart())) return true;
+                if (widget._chartWidget && widget._chartWidget.activeChart && await setVia(widget._chartWidget.activeChart())) return true;
+                return widget.symbol && widget.symbol() === {symbol_json};
+            }} catch (e) {{
+                return false;
+            }}
+        }})()
+        """
+        ok = bool(await self.evaluate(expr, timeout=max(5.0, settle_seconds + 3.0)))
+        if ok and settle_seconds > 0:
+            await asyncio.sleep(settle_seconds)
+        return ok
 
     # ------------------------------------------------------------------ #
     #  描画操作

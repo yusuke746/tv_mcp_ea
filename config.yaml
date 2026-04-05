@@ -3,6 +3,7 @@ system:
   cdp_host: "localhost"
   cdp_port: 9222
   fx_system_webhook_url: "http://localhost:80/webhook/mcp"
+  fx_system_context_webhook_url: "http://localhost:80/webhook/mcp_context"
   log_level: "INFO"
   state_file: "state/drawing_state.json"
 
@@ -66,11 +67,20 @@ detection:
   sr_lookback_bars: 150                # S/R検出範囲（エントリー足）
   swing_order: 5                       # スイング検出の感度（前後Nバーで高値/安値判定）
   sr_cluster_pips: 5.0                 # S/Rクラスタリングの価格幅（pips）
+  gold_sr_cluster_pips: 25.0           # GOLD の S/R クラスタ幅（0.25ドル）
   sr_min_touches: 2                    # S/Rとして認定する最低タッチ数
+  gold_sr_atr_multiplier: 6.0          # GOLD は遠めの主要水平線も残す
   triangle_min_touches: 2              # トライアングル各辺の最低スイングポイント数
   triangle_max_bars: 100               # トライアングル探索範囲(バー数)
+  triangle_r2_min: 0.5                 # トライアングル回帰の最低R²
+  gold_triangle_max_bars: 150          # GOLD は探索窓を広げる
+  gold_triangle_r2_min: 0.35           # GOLD は多少粗い三角も許容
   channel_r2_min: 0.80                 # 平行チャネルの線形回帰R²最低値
   channel_max_bars: 80                 # チャネル探索範囲(バー数)
+  channel_slope_tolerance: 0.15        # チャネルの平行度許容差
+  gold_channel_r2_min: 0.60            # GOLD は粗めのチャネルも許容
+  gold_channel_max_bars: 120           # GOLD は探索窓を広げる
+  gold_channel_slope_tolerance: 0.30   # GOLD は傾き差の許容を広げる
 
 drawing:
   sr_color_resistance: "#FF4444"

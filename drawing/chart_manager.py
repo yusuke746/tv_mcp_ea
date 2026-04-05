@@ -82,15 +82,18 @@ class ChartManager:
         sr_levels: list[SRLevel],
         triangles: list[Triangle],
         channels: list[Channel],
-    ) -> None:
+    ) -> bool:
         """
         現在 TV に表示されているシンボルが target_tv_symbol と一致する場合のみ
         新しいパターンで描画を更新する。
+
+        Returns:
+            描画更新を実行した場合は True、それ以外は False
         """
         current = await self._cdp.get_current_symbol()
         if current != target_tv_symbol:
             logger.debug(f"TV shows {current}, skip drawing for {target_tv_symbol}")
-            return
+            return False
 
         logger.info(f"Updating drawings for {target_tv_symbol}")
 
@@ -123,6 +126,7 @@ class ChartManager:
         _save_state(state)
 
         logger.info(f"Drew {len(new_ids)} shapes for {target_tv_symbol}")
+        return True
 
     async def clear_all(self, symbol: str) -> None:
         """指定シンボルの全描画を削除する（緊急クリア用）。"""
@@ -218,3 +222,5 @@ class ChartManager:
                 results.append(None)
 
         return results
+
+

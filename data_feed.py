@@ -110,6 +110,32 @@ class DataFeed:
         atr14 = self._calc_atr(df, period=14)
         return OHLCVData(symbol=symbol, timeframe=timeframe, bars=df, atr14=atr14)
 
+    def get_open_positions(self, symbol: str) -> list[dict]:
+        """指定シンボルの現在保有ポジション一覧を返す。"""
+        if not self._initialized:
+            return []
+        try:
+            positions = mt5.positions_get(symbol=symbol)
+        except Exception:
+            return []
+        if positions is None:
+            return []
+
+        out: list[dict] = []
+        for p in positions:
+            # type: 0=BUY, 1=SELL
+            out.append({
+                "ticket": int(getattr(p, "ticket", 0)),
+                "type": int(getattr(p, "type", -1)),
+                "volume": float(getattr(p, "volume", 0.0)),
+                "price_open": float(getattr(p, "price_open", 0.0)),
+                "sl": float(getattr(p, "sl", 0.0)),
+                "tp": float(getattr(p, "tp", 0.0)),
+                "profit": float(getattr(p, "profit", 0.0)),
+                "symbol": str(getattr(p, "symbol", symbol)),
+            })
+        return out
+
     # ------------------------------------------------------------------ #
     #  内部ヘルパー
     # ------------------------------------------------------------------ #

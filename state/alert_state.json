@@ -1,0 +1,57 @@
+{
+  "OANDA:USDJPY": {
+    "alert_ids": [],
+    "levels": [
+      {
+        "price": 159.44916666666666,
+        "direction": "short",
+        "pattern": "sr_support"
+      },
+      {
+        "price": 159.53074999999998,
+        "direction": "long",
+        "pattern": "sr_support"
+      },
+      {
+        "price": 159.6145,
+        "direction": "long",
+        "pattern": "sr_resistance"
+      }
+    ]
+  },
+  "OANDA:EURUSD": {
+    "alert_ids": [],
+    "levels": [
+      {
+        "price": 1.1512733333333334,
+        "direction": "long",
+        "pattern": "sr_support"
+      },
+      {
+        "price": 1.1520000000000001,
+        "direction": "long",
+        "pattern": "sr_both"
+      }
+    ]
+  },
+  "OANDA:GBPJPY": {
+    "alert_ids": [],
+    "levels": [
+      {
+        "price": 210.57600000000002,
+        "direction": "long",
+        "pattern": "sr_support"
+      }
+    ]
+  },
+  "OANDA:XAUUSD": {
+    "alert_ids": [],
+    "levels": [
+      {
+        "price": 4650.915,
+        "direction": "short",
+        "pattern": "sr_both"
+      }
+    ]
+  }
+}

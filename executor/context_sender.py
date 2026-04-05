@@ -38,12 +38,30 @@ class MarketContext:
 class ContextSender:
     """保有ペアの市場コンテキストを fx_system に送信する。"""
 
-    def __init__(self, webhook_url: str, webhook_token: str):
-        # /webhook/mcp → /webhook/mcp_context
-        self._url = webhook_url.rstrip("/").replace("/webhook/mcp", "/webhook/mcp_context")
-        if "/mcp_context" not in self._url:
-            self._url = webhook_url.rstrip("/") + "_context"
+    def __init__(self, webhook_url: str, webhook_token: str, context_webhook_url: str | None = None):
+        # 既定: /webhook/mcp → /webhook/mcp_context
+        base = webhook_url.rstrip("/").replace("/webhook/mcp", "/webhook/mcp_context")
+        if "/mcp_context" not in base:
+            base = webhook_url.rstrip("/") + "_context"
+        self._url = (context_webhook_url or base).rstrip("/")
         self._token = webhook_token
+
+    def _candidate_urls(self) -> list[str]:
+        """環境差異向けのフォールバック候補 URL を返す。"""
+        urls = [self._url]
+        # localhost のみ 80/8000 を相互フォールバック
+        if "localhost:80/" in self._url:
+            urls.append(self._url.replace("localhost:80/", "localhost:8000/"))
+        elif "localhost:8000/" in self._url:
+            urls.append(self._url.replace("localhost:8000/", "localhost:80/"))
+        # 重複削除
+        seen = set()
+        unique = []
+        for u in urls:
+            if u not in seen:
+                seen.add(u)
+                unique.append(u)
+        return unique
 
     def build_context(
         self,
@@ -141,17 +159,23 @@ class ContextSender:
         }
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self._url,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=5),
-                ) as resp:
-                    if resp.status == 200:
-                        logger.debug(f"Context sent: {ctx.pair}")
-                        return True
-                    text = await resp.text()
-                    logger.warning(f"Context POST {resp.status}: {text[:200]}")
-                    return False
+                for url in self._candidate_urls():
+                    try:
+                        async with session.post(
+                            url,
+                            json=payload,
+                            timeout=aiohttp.ClientTimeout(total=5),
+                        ) as resp:
+                            if resp.status == 200:
+                                if url != self._url:
+                                    logger.info(f"Context POST switched endpoint: {self._url} -> {url}")
+                                    self._url = url
+                                logger.debug(f"Context sent: {ctx.pair}")
+                                return True
+                            text = await resp.text()
+                            logger.warning(f"Context POST {resp.status} ({url}): {text[:200]}")
+                    except Exception as e:
+                        logger.debug(f"Context POST failed ({url}): {e}")
         except Exception as e:
-            logger.debug(f"Context POST failed (fx_system may not be running): {e}")
-            return False
+            logger.debug(f"Context POST failed (session error): {e}")
+        return False

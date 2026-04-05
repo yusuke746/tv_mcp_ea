@@ -64,13 +64,15 @@ class AlertManager:
         channels: list[Channel],
         current_price: float,
         atr: float,
+        open_positions: list[dict] | None = None,
     ) -> int:
         """
         指定シンボルの MCP-EA 管理アラートを更新する。
 
-        1. 既存アラートから自タグ付きのものを削除
-        2. 重要レベルに新アラートを作成
-        3. 作成数を返す
+        ポジションが存在する場合、構造レベルを自動的にエントリー/エグジットに分類し、
+        エグジット用アラートには signal_source="exit_alert" を設定する。
+        これにより fx_system がリアルタイムで構造レベル到達を検知して
+        ポジション評価（クローズ判定）を行える。
 
         Returns:
             作成したアラート数
@@ -80,7 +82,8 @@ class AlertManager:
 
         # ── 重要レベルの選定 ─────────────────────────────────
         candidates = self._pick_levels(
-            sr_levels, triangles, channels, current_price, atr
+            sr_levels, triangles, channels, current_price, atr,
+            open_positions=open_positions,
         )
 
         if not candidates:
@@ -194,15 +197,30 @@ class AlertManager:
         channels: list[Channel],
         current_price: float,
         atr: float,
+        open_positions: list[dict] | None = None,
     ) -> list[dict]:
         """
         アラート設定候補レベルを重要度順に返す。
 
-        - 現在価格に近い（ATR×2 以内）レベルを優先
-        - S/R はタッチ回数でランク付け
-        - パターン境界はレベルとして追加
+        ポジションが存在する場合:
+          - ロング保有 → 上方 resistance = exit_tp, 下方 support = exit_sl
+          - ショート保有 → 下方 support = exit_tp, 上方 resistance = exit_sl
+          エグジット関連レベルは高優先度で action="exit" をマーク。
+
+        ポジションがない場合:
+          - 従来通りエントリー候補として action="entry" をマーク。
         """
         candidates: list[dict] = []
+
+        # ── ポジション情報の抽出 ──
+        pos_direction: str | None = None
+        pos_ticket: int = 0
+        pos_open_price: float = 0.0
+        if open_positions:
+            pos = open_positions[0]
+            pos_direction = "long" if int(pos.get("type", 0)) == 0 else "short"
+            pos_ticket = int(pos.get("ticket", 0))
+            pos_open_price = float(pos.get("price_open", 0.0))
 
         # ── S/R レベル ──
         for lvl in sr_levels:
@@ -210,12 +228,41 @@ class AlertManager:
             if dist > atr * 3:
                 continue
 
-            direction = "long" if lvl.price > current_price else "short"
+            is_above = lvl.price > current_price
+            direction = "long" if is_above else "short"
+
+            # エグジット分類
+            action = "entry"
+            exit_type = ""
+            if pos_direction:
+                if pos_direction == "long":
+                    if is_above and lvl.kind in ("resistance", "both"):
+                        action = "exit"
+                        exit_type = "tp"
+                    elif not is_above and lvl.kind in ("support", "both"):
+                        action = "exit"
+                        exit_type = "sl"
+                else:  # short
+                    if not is_above and lvl.kind in ("support", "both"):
+                        action = "exit"
+                        exit_type = "tp"
+                    elif is_above and lvl.kind in ("resistance", "both"):
+                        action = "exit"
+                        exit_type = "sl"
+
+            # エグジットレベルは高優先度（ポジション保護）
+            base_priority = lvl.touches * 10 + max(0, 30 - dist / atr * 10)
+            if action == "exit":
+                base_priority += 60  # エグジットを優先
+
             candidates.append({
                 "price": lvl.price,
                 "direction": direction,
                 "pattern": f"sr_{lvl.kind}",
-                "priority": lvl.touches * 10 + max(0, 30 - dist / atr * 10),
+                "priority": base_priority,
+                "action": action,
+                "exit_type": exit_type,
+                "ticket": pos_ticket if action == "exit" else 0,
             })
 
         # ── トライアングル ──
@@ -227,11 +274,36 @@ class AlertManager:
                 dist = abs(price - current_price)
                 if dist > atr * 3:
                     continue
+
+                is_above = price > current_price
+                action = "entry"
+                exit_type = ""
+                if pos_direction:
+                    if pos_direction == "long" and is_above:
+                        action = "exit"
+                        exit_type = "tp"
+                    elif pos_direction == "long" and not is_above:
+                        action = "exit"
+                        exit_type = "sl"
+                    elif pos_direction == "short" and not is_above:
+                        action = "exit"
+                        exit_type = "tp"
+                    elif pos_direction == "short" and is_above:
+                        action = "exit"
+                        exit_type = "sl"
+
+                base_priority = 20 + max(0, 30 - dist / atr * 10)
+                if action == "exit":
+                    base_priority += 60
+
                 candidates.append({
                     "price": price,
                     "direction": direction,
                     "pattern": kind,
-                    "priority": 20 + max(0, 30 - dist / atr * 10),
+                    "priority": base_priority,
+                    "action": action,
+                    "exit_type": exit_type,
+                    "ticket": pos_ticket if action == "exit" else 0,
                 })
 
         # ── チャネル ──
@@ -243,11 +315,36 @@ class AlertManager:
                 dist = abs(price - current_price)
                 if dist > atr * 3:
                     continue
+
+                is_above = price > current_price
+                action = "entry"
+                exit_type = ""
+                if pos_direction:
+                    if pos_direction == "long" and is_above:
+                        action = "exit"
+                        exit_type = "tp"
+                    elif pos_direction == "long" and not is_above:
+                        action = "exit"
+                        exit_type = "sl"
+                    elif pos_direction == "short" and not is_above:
+                        action = "exit"
+                        exit_type = "tp"
+                    elif pos_direction == "short" and is_above:
+                        action = "exit"
+                        exit_type = "sl"
+
+                base_priority = 15 + max(0, 30 - dist / atr * 10)
+                if action == "exit":
+                    base_priority += 60
+
                 candidates.append({
                     "price": price,
                     "direction": direction,
                     "pattern": kind,
-                    "priority": 15 + max(0, 30 - dist / atr * 10),
+                    "priority": base_priority,
+                    "action": action,
+                    "exit_type": exit_type,
+                    "ticket": pos_ticket if action == "exit" else 0,
                 })
 
         # 重要度順にソート
@@ -258,15 +355,33 @@ class AlertManager:
         """
         fx_system が解釈できる JSON を含むアラートメッセージを構築する。
 
-        TradingView が webhook を発火する際、このメッセージが body として送信される。
+        action="exit" の場合は signal_source="exit_alert" として送信し、
+        fx_system が即座にポジション評価（クローズ判定）を行えるようにする。
         """
-        payload = {
-            "signal_source": "tv_alert",
-            "pair": mt5_symbol,
-            "direction": level["direction"],
-            "pattern": level["pattern"],
-            "pattern_level": level["price"],
-            "atr": round(atr, 5),
-        }
+        action = level.get("action", "entry")
+
+        if action == "exit":
+            payload = {
+                "signal_source": "exit_alert",
+                "pair": mt5_symbol,
+                "direction": level["direction"],
+                "pattern": level["pattern"],
+                "pattern_level": level["price"],
+                "atr": round(atr, 5),
+                "exit_type": level.get("exit_type", ""),
+                "ticket": level.get("ticket", 0),
+            }
+            tag_label = f"EXIT {level.get('exit_type', '').upper()}"
+        else:
+            payload = {
+                "signal_source": "tv_alert",
+                "pair": mt5_symbol,
+                "direction": level["direction"],
+                "pattern": level["pattern"],
+                "pattern_level": level["price"],
+                "atr": round(atr, 5),
+            }
+            tag_label = level["direction"]
+
         # 可読テキスト + JSON ペイロード
-        return f'{_TAG} {mt5_symbol} {level["direction"]} @ {level["price"]:.5f}\n{json.dumps(payload)}'
+        return f'{_TAG} {mt5_symbol} {tag_label} @ {level["price"]:.5f}\n{json.dumps(payload)}'

@@ -86,6 +86,7 @@ class TVMcpEA:
         self._context_sender = ContextSender(
             webhook_url=sys_cfg["fx_system_webhook_url"],
             webhook_token=os.environ.get("WEBHOOK_SECRET", os.environ.get("WEBHOOK_TOKEN", "")),
+            context_webhook_url=sys_cfg.get("fx_system_context_webhook_url"),
         )
 
         # アラート管理（TV アラート設定 + 削除）
@@ -169,6 +170,21 @@ class TVMcpEA:
     async def _scan_job(self) -> None:
         logger.info("=== Scan cycle start ===")
         det_cfg = self._cfg["detection"]
+        chart_index_map: dict[str, int] = {}
+
+        if self._cdp_connected:
+            try:
+                charts = await self._cdp.list_charts()
+                if len(charts) > 1:
+                    logger.info(f"Detected TradingView multi-pane layout: {len(charts)} charts")
+                for pair in self._cfg["pairs"]:
+                    idx = await self._cdp.find_chart_index_by_symbol(pair["tv_symbol"])
+                    if idx is not None:
+                        chart_index_map[pair["tv_symbol"]] = idx
+                if chart_index_map:
+                    logger.debug(f"Chart index map: {chart_index_map}")
+            except Exception as e:
+                logger.warning(f"Failed to inspect TradingView panes: {e}")
 
         for pair in self._cfg["pairs"]:
             tv_sym  = pair["tv_symbol"]
@@ -176,7 +192,10 @@ class TVMcpEA:
             pip     = float(pair["pip_size"])
 
             try:
-                await self._scan_pair(pair, det_cfg, tv_sym, mt5_sym, pip)
+                await self._scan_pair(
+                    pair, det_cfg, tv_sym, mt5_sym, pip,
+                    chart_index=chart_index_map.get(tv_sym),
+                )
             except Exception as e:
                 logger.error(f"Error scanning {mt5_sym}: {e}", exc_info=True)
 
@@ -185,7 +204,10 @@ class TVMcpEA:
     async def _scan_pair(
         self, pair: dict, det_cfg: dict,
         tv_sym: str, mt5_sym: str, pip: float,
+        chart_index: int | None = None,
     ) -> None:
+        is_gold = pair.get("category") == "gold"
+
         # ─── データ取得 ─────────────────────────────────────────────────────
         ohlcv_15m = self._data_feed.get_ohlcv(
             mt5_sym, det_cfg["timeframe_entry"], int(det_cfg["bars_entry"])
@@ -206,54 +228,102 @@ class TVMcpEA:
         highs    = [s for s in swings if s.kind == "high"]
         lows     = [s for s in swings if s.kind == "low"]
 
+        sr_cluster_pips = float(
+            det_cfg.get("gold_sr_cluster_pips", det_cfg["sr_cluster_pips"])
+            if is_gold else det_cfg["sr_cluster_pips"]
+        )
+        sr_atr_multiplier = float(
+            det_cfg.get("gold_sr_atr_multiplier", 6.0)
+            if is_gold else 3.0
+        )
+        triangle_max_bars = int(
+            det_cfg.get("gold_triangle_max_bars", det_cfg["triangle_max_bars"])
+            if is_gold else det_cfg["triangle_max_bars"]
+        )
+        triangle_min_r2 = float(
+            det_cfg.get("gold_triangle_r2_min", det_cfg.get("triangle_r2_min", 0.5))
+            if is_gold else det_cfg.get("triangle_r2_min", 0.5)
+        )
+        channel_max_bars = int(
+            det_cfg.get("gold_channel_max_bars", det_cfg["channel_max_bars"])
+            if is_gold else det_cfg["channel_max_bars"]
+        )
+        channel_min_r2 = float(
+            det_cfg.get("gold_channel_r2_min", det_cfg["channel_r2_min"])
+            if is_gold else det_cfg["channel_r2_min"]
+        )
+        channel_slope_tolerance = float(
+            det_cfg.get("gold_channel_slope_tolerance", det_cfg.get("channel_slope_tolerance", 0.15))
+            if is_gold else det_cfg.get("channel_slope_tolerance", 0.15)
+        )
+
         sr_levels = find_sr_levels(
             swings,
             pip_size=pip,
-            cluster_pips=float(det_cfg["sr_cluster_pips"]),
+            cluster_pips=sr_cluster_pips,
             min_touches=int(det_cfg["sr_min_touches"]),
         )
         # 現在価格の ±ATR×3 以内のレベルに絞り込む
         current_price = float(df.iloc[-2]["close"]) if len(df) >= 2 else 0.0
         sr_levels = filter_sr_near_price(
-            sr_levels, current_price, ohlcv_15m.atr14, atr_multiplier=3.0
+            sr_levels, current_price, ohlcv_15m.atr14, atr_multiplier=sr_atr_multiplier
         )
+
+        # 保有ポジション情報（アラートのエントリ/エグジット分類に使用）
+        open_positions = self._data_feed.get_open_positions(mt5_sym)
 
         triangles = find_triangles(
             highs, lows, current_bar,
             min_touches=int(det_cfg["triangle_min_touches"]),
-            max_bars=int(det_cfg["triangle_max_bars"]),
+            max_bars=triangle_max_bars,
+            min_r2=triangle_min_r2,
         )
 
         channels = find_channels(
             highs, lows, current_bar,
             pip_size=pip,
-            max_bars=int(det_cfg["channel_max_bars"]),
-            min_r2=float(det_cfg["channel_r2_min"]),
+            max_bars=channel_max_bars,
+            min_r2=channel_min_r2,
+            slope_tolerance=channel_slope_tolerance,
         )
 
         logger.debug(
-            f"{mt5_sym}: SR={len(sr_levels)} TRI={len(triangles)} CH={len(channels)}"
+            f"{mt5_sym}: SR={len(sr_levels)} TRI={len(triangles)} CH={len(channels)} "
+            f"(cluster_pips={sr_cluster_pips}, sr_atr_mult={sr_atr_multiplier}, "
+            f"tri_r2={triangle_min_r2}, ch_r2={channel_min_r2})"
         )
 
         # ─── チャート描画更新（CDP 使用時のみ）──────────────────────────────
+        drawings_updated = False
+        chart_ready = False
         if self._cdp_connected:
             # CDP が切れている可能性を考慮して再接続を試みる
             try:
+                if chart_index is not None:
+                    active_ok = await self._cdp.set_active_chart(chart_index)
+                    if not active_ok:
+                        logger.warning(f"Failed to activate TradingView pane {chart_index} for {tv_sym}")
+                    chart_ready = active_ok
+                else:
+                    chart_ready = await self._cdp.set_current_symbol(tv_sym)
+                if not chart_ready:
+                    logger.warning(f"Failed to prepare TradingView chart for {tv_sym}")
                 ai_threshold = int(self._cfg["llm"]["pattern_score_threshold"])
                 # AI スコアの高いパターンのみ描画対象に絞る（省略可）
-                await self._chart_mgr.update_drawings(
-                    target_tv_symbol=tv_sym,
-                    df=df,
-                    sr_levels=sr_levels,
-                    triangles=triangles,
-                    channels=channels,
-                )
+                if chart_ready:
+                    drawings_updated = await self._chart_mgr.update_drawings(
+                        target_tv_symbol=tv_sym,
+                        df=df,
+                        sr_levels=sr_levels,
+                        triangles=triangles,
+                        channels=channels,
+                    )
             except CDPError as e:
                 logger.warning(f"CDP drawing failed: {e} — reconnecting next cycle")
                 self._cdp_connected = False
 
         # ─── TV アラート更新（古いアラート削除 → 新アラート設定）────────────
-        if self._cdp_connected and self._alerts_enabled:
+        if self._cdp_connected and self._alerts_enabled and drawings_updated:
             try:
                 n_alerts = await self._alert_mgr.update_alerts(
                     tv_symbol=tv_sym,
@@ -263,10 +333,13 @@ class TVMcpEA:
                     channels=channels,
                     current_price=current_price,
                     atr=ohlcv_15m.atr14,
+                    open_positions=open_positions,
                 )
                 logger.debug(f"{mt5_sym}: {n_alerts} TV alerts updated")
             except Exception as e:
                 logger.warning(f"Alert update failed: {e}")
+        elif self._cdp_connected and self._alerts_enabled:
+            logger.debug(f"{mt5_sym}: skip alerts because chart is not showing {tv_sym}")
 
         # ─── ブレイクアウト検出 & webhook POST ─────────────────────────────
         if ohlcv_1h is None:
@@ -285,7 +358,7 @@ class TVMcpEA:
 
         # テクニカル指標計算: Pine テーブル優先 → Python 近似フォールバック
         indicators = None
-        if self._cdp and self._cdp._ws:
+        if self._cdp and self._cdp._ws and chart_ready:
             try:
                 indicators = await read_pine_features(self._cdp)
                 if indicators:
@@ -326,6 +399,7 @@ class TVMcpEA:
             swings=swings,
         )
         await self._context_sender.send(ctx)
+
 
 
 # ─── エントリーポイント ────────────────────────────────────────────────────────
