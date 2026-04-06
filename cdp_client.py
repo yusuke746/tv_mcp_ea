@@ -384,8 +384,55 @@ class CDPClient:
     #  アラート API (TradingView pricealerts REST)
     # ------------------------------------------------------------------ #
 
+    async def _install_pricealerts_interceptors(self, webhook_url: str = "") -> bool:
+        """
+        pricealerts リクエストの URL パラメータをキャプチャし、
+        create_alert リクエストの webhook URL を差し替えるインターセプターを設置する。
+        既に設置済みの場合は webhook_url だけ更新する。
+        """
+        hook_js = json.dumps(webhook_url) if webhook_url else "null"
+        result = await self.evaluate(f"""
+            (function() {{
+                // webhook URL を更新（既存インターセプターがあれば更新のみ）
+                window.__tvMcpWebhookUrl = {hook_js};
+
+                if (window.__tvMcpInterceptorInstalled) return 'updated';
+
+                var origFetch = window.fetch;
+                window.fetch = function(url, opts) {{
+                    var urlStr = url ? url.toString() : '';
+                    // pricealerts の URL パラメータをキャプチャ（list_alerts, create_alert 両方から）
+                    if (urlStr.includes('pricealerts.tradingview.com')) {{
+                        try {{
+                            var qIdx = urlStr.indexOf('?');
+                            if (qIdx >= 0) {{
+                                window.__tvCreateAlertUrlParams = urlStr.substring(qIdx + 1);
+                            }}
+                        }} catch(e) {{}}
+                    }}
+                    // create_alert POST の webhook を差し替え
+                    if (urlStr.includes('pricealerts') && urlStr.includes('create_alert') &&
+                        opts && opts.body && window.__tvMcpWebhookUrl) {{
+                        try {{
+                            var body = JSON.parse(opts.body);
+                            if (body.payload) {{
+                                body.payload.web_hook = window.__tvMcpWebhookUrl;
+                                opts = Object.assign({{}}, opts, {{body: JSON.stringify(body)}});
+                            }}
+                        }} catch(e) {{}}
+                    }}
+                    return origFetch.call(this, url, opts);
+                }};
+                window.__tvMcpInterceptorInstalled = true;
+                return 'installed';
+            }})()
+        """)
+        return result in ("installed", "updated")
+
     async def list_alerts(self) -> list[dict]:
         """TradingView の pricealerts API から全アラートを取得する。"""
+        # インターセプターを設置して URL パラメータをキャプチャする（初回のみ効果あり）
+        await self._install_pricealerts_interceptors()
         result = await self.evaluate("""
             (async function() {
                 try {
@@ -407,6 +454,7 @@ class CDPClient:
                             message: a.message || '',
                             price: a.price || 0,
                             active: a.active,
+                            web_hook: a.web_hook || '',
                             last_fired: a.last_fire_time || 0,
                             created: a.create_time || 0
                         };
@@ -437,46 +485,77 @@ class CDPClient:
         """, timeout=10)
         return bool(result)
 
-    async def create_price_alert_api(self, tv_symbol: str, price: float, message: str, direction: str = "long") -> bool:
+    async def create_price_alert_api(
+        self,
+        tv_symbol: str,
+        price: float,
+        message: str,
+        direction: str = "long",
+        webhook_url: str = "",
+    ) -> bool:
         """
         REST API 経由で TV 価格アラートを作成する（UIより高速・確実）。
-        メッセージが確実に設定されるため [MCP-EA] タグによる削除が機能する。
+        TradingView UI が送信するのと同じ {"payload": {...}} 形式 + URL パラメータを使用。
 
         Args:
-            direction: "long" (>価格) or "short" (<価格) — 一発型 crossing ではなく方向付き条件
+            direction:   "long" (>価格) or "short" (<価格) — 方向付き条件
+            webhook_url: 各アラートに個別設定する webhook 送信先 URL
         """
-        sym_json = json.dumps({"symbol": tv_symbol, "adjustment": "splits"})
-        name = f"{tv_symbol.split(':')[-1]} MCP @ {price:.2f}"
-        
-        # direction に応じた条件タイプ
-        # "long" = greater_than: 価格が上から降ってくることを検知（ロングのTP）
-        # "short" = less_than: 価格が下から上ってくることを検知（ロングのSL）
-        if direction == "long":
-            condition_type = "greater_than"
-        else:
-            condition_type = "less_than"
+        # インターセプターを設置して URL パラメータをキャプチャする
+        await self._install_pricealerts_interceptors(webhook_url)
+        webhook_js = json.dumps(webhook_url) if webhook_url else "null"
 
         result = await self.evaluate(
             f"""
             (async function() {{
                 try {{
-                    var params = new URLSearchParams();
-                    params.set('symbol', '=' + {json.dumps(sym_json)});
-                    params.set('condition', JSON.stringify({{type:'{condition_type}',value:{price}}}));
-                    params.set('price', String({price}));
-                    params.set('name', {json.dumps(name)});
-                    params.set('message', {json.dumps(message)});
-                    params.set('expiration_time', '0');
-                    params.set('auto_deactivate', 'false');
-                    var r = await fetch('https://pricealerts.tradingview.com/create_alert', {{
+                    // TV UI が使う URL パラメータを取得（ページ内でキャプチャ済みの情報を使用）
+                    var baseUrl = 'https://pricealerts.tradingview.com/create_alert';
+                    var urlParams = window.__tvCreateAlertUrlParams || null;
+                    if (urlParams) {{
+                        baseUrl += '?' + urlParams;
+                    }}
+
+                    // TV UI と同じ payload 形式
+                    var symbol = {json.dumps(tv_symbol)};
+                    // currency-id は OANDA等の場合 USD、デフォルト USD
+                    var symParts = symbol.split(':');
+                    var symObj = {{"currency-id":"USD","session":"regular","symbol": symbol}};
+
+                    var payload = {{
+                        symbol: '=' + JSON.stringify(symObj),
+                        resolution: '1',
+                        message: {json.dumps(message)},
+                        sound_file: null,
+                        sound_duration: 0,
+                        popup: false,
+                        expiration: null,
+                        auto_deactivate: true,
+                        email: false,
+                        sms_over_email: false,
+                        mobile_push: false,
+                        web_hook: {webhook_js} !== null ? {webhook_js} : undefined,
+                        name: null,
+                        conditions: [{{
+                            type: 'cross',
+                            frequency: 'on_first_fire',
+                            series: [{{type: 'barset'}}, {{type: 'value', value: {price}}}],
+                            resolution: '1'
+                        }}],
+                        active: true,
+                        ignore_warnings: true
+                    }};
+                    if (payload.web_hook === undefined) delete payload.web_hook;
+
+                    var r = await fetch(baseUrl, {{
                         method: 'POST',
                         credentials: 'include',
-                        headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
-                        body: params.toString()
+                        headers: {{'Content-Type': 'application/json'}},
+                        body: JSON.stringify({{payload: payload}})
                     }});
                     var d = await r.json();
-                    if (d.s !== 'ok') {{ return JSON.stringify(d); }}
-                    return (d.r || true);
+                    if (d.s !== 'ok' || !d.r) {{ return false; }}
+                    return d.r;
                 }} catch(e) {{ return false; }}
             }})()
             """,
@@ -487,133 +566,117 @@ class CDPClient:
     async def create_price_alert_ui(self, price: float, message: str, webhook_url: str = "") -> bool:
         """
         TV のアラート作成ダイアログを操作して価格アラートを作成する（フォールバック用）。
+
+        fetch インターセプターで webhook URL を差し替えるため、Notifications パネルへの
+        ナビゲーションは不要。
         """
-        # ── Step 1: ダイアログを開く ──
-        # ── Step 1: ダイアログを開く ──
+        # Step 1: fetch インターセプターを設置（webhook URL を差し替え）
+        if webhook_url:
+            await self._install_pricealerts_interceptors(webhook_url)
+
+        # Step 2: 既存ダイアログをすべて閉じる
+        await self.evaluate("""
+            (function() {
+                document.querySelectorAll('button').forEach(function(b) {
+                    var txt = b.textContent.trim();
+                    if (txt === 'Cancel' || txt === 'Close menu') b.click();
+                });
+            })()
+        """)
+        await asyncio.sleep(0.3)
+
+        # Step 3: ツールバーの "Alert" ボタンでダイアログを開く
         opened = await self.evaluate("""
             (function() {
-                var btn = document.querySelector('[aria-label="Create Alert"]')
-                    || document.querySelector('[data-name="alerts"]');
-                if (btn) { btn.click(); return true; }
+                var btns = document.querySelectorAll('button');
+                for (var i = 0; i < btns.length; i++) {
+                    if (btns[i].textContent.trim() === 'Alert') {
+                        btns[i].click();
+                        return true;
+                    }
+                }
                 return false;
             })()
         """)
         if not opened:
-            # Alt+A ショートカット
-            await self._send("Input.dispatchKeyEvent", {
-                "type": "keyDown", "modifiers": 1,
-                "key": "a", "code": "KeyA", "windowsVirtualKeyCode": 65,
-            })
-            await self._send("Input.dispatchKeyEvent", {
-                "type": "keyUp", "key": "a", "code": "KeyA",
-            })
+            return False
 
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(2.0)
 
-        # ── Step 2: 価格を入力 ──
+        # ダイアログが開いたか確認
+        if not await self.evaluate("!!document.querySelector('[class*=\"dialog-YKU5b5xj\"]')"):
+            return False
+
+        # Step 4: 価格を設定
         await self.evaluate(f"""
             (function() {{
-                var inputs = document.querySelectorAll(
-                    '[class*="alert"] input[type="text"], '
-                    + '[class*="alert"] input[type="number"]');
-                for (var i = 0; i < inputs.length; i++) {{
-                    var label = inputs[i].closest('[class*="row"]')
-                        ?.querySelector('[class*="label"]');
-                    if (label && /value|price/i.test(label.textContent)) {{
-                        var ns = Object.getOwnPropertyDescriptor(
-                            HTMLInputElement.prototype, 'value').set;
-                        ns.call(inputs[i], '{price}');
-                        inputs[i].dispatchEvent(new Event('input', {{bubbles:true}}));
-                        inputs[i].dispatchEvent(new Event('change', {{bubbles:true}}));
-                        return true;
-                    }}
-                }}
-                if (inputs.length > 0) {{
-                    var ns = Object.getOwnPropertyDescriptor(
-                        HTMLInputElement.prototype, 'value').set;
-                    ns.call(inputs[0], '{price}');
-                    inputs[0].dispatchEvent(new Event('input', {{bubbles:true}}));
-                }}
-                return false;
+                var d = document.querySelector('[class*="dialog-YKU5b5xj"]');
+                if (!d) return;
+                var inp = d.querySelector('input.input-RUSovanF') ||
+                          d.querySelector('input[class*="with-end-slot"]');
+                if (!inp) return;
+                var ns = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                ns.call(inp, '{price}');
+                inp.dispatchEvent(new Event('input', {{bubbles: true}}));
+                inp.dispatchEvent(new Event('change', {{bubbles: true}}));
             }})()
         """)
+        await asyncio.sleep(0.3)
 
-        # ── Step 3: メッセージを入力 ──
-        msg_js = json.dumps(message)
-        await self.evaluate(f"""
-            (function() {{
-                var ta = document.querySelector('[class*="alert"] textarea')
-                    || document.querySelector('textarea[placeholder*="message"]');
-                if (ta) {{
-                    var ns = Object.getOwnPropertyDescriptor(
-                        HTMLTextAreaElement.prototype, 'value').set;
-                    ns.call(ta, {msg_js});
-                    ta.dispatchEvent(new Event('input', {{bubbles:true}}));
-                }}
-            }})()
-        """)
+        # Step 5: メッセージを設定
+        # メッセージボタン（最初の button-KijOUKJc）をクリック → Edit message パネルへ
+        if message:
+            msg_js = json.dumps(message)
+            await self.evaluate("""
+                (function() {
+                    var d = document.querySelector('[class*="dialog-YKU5b5xj"]');
+                    if (!d) return;
+                    var btns = d.querySelectorAll('[class*="button-KijOUKJc"]');
+                    if (btns.length > 0) btns[0].click();
+                })()
+            """)
+            await asyncio.sleep(1.0)
 
-        # ── Step 3.5: Webhook URL を有効化して入力（可能な場合） ──
-        if webhook_url:
-            hook_js = json.dumps(webhook_url)
+            # textarea にカスタムメッセージを設定
             await self.evaluate(f"""
                 (function() {{
-                    try {{
-                        var root = document.querySelector('[class*="alert"]') || document.body;
-
-                        // Webhook URL 行のトグルを ON にする
-                        var labels = root.querySelectorAll('label, span, div');
-                        for (var i = 0; i < labels.length; i++) {{
-                            var txt = (labels[i].textContent || '').trim();
-                            if (!/webhook\\s*url/i.test(txt)) continue;
-                            var row = labels[i].closest('label, [class*="row"], [class*="item"]') || labels[i].parentElement;
-                            if (!row) continue;
-                            var cb = row.querySelector('input[type="checkbox"]');
-                            if (cb && !cb.checked) {{ cb.click(); }}
-                            else if (!cb) {{
-                                var roleCb = row.querySelector('[role="checkbox"]');
-                                if (roleCb && roleCb.getAttribute('aria-checked') === 'false') roleCb.click();
-                            }}
-                            break;
-                        }}
-
-                        // URL 入力欄に値をセット
-                        var inputs = root.querySelectorAll('input[type="url"], input[type="text"], textarea');
-                        for (var j = 0; j < inputs.length; j++) {{
-                            var ph = (inputs[j].getAttribute('placeholder') || '').toLowerCase();
-                            var nm = (inputs[j].getAttribute('name') || '').toLowerCase();
-                            var aria = (inputs[j].getAttribute('aria-label') || '').toLowerCase();
-                            if (ph.indexOf('http') >= 0 || ph.indexOf('webhook') >= 0 || nm.indexOf('webhook') >= 0 || aria.indexOf('webhook') >= 0) {{
-                                if (inputs[j].tagName.toLowerCase() === 'textarea') {{
-                                    var ts = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
-                                    ts.call(inputs[j], {hook_js});
-                                }} else {{
-                                    var is = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-                                    is.call(inputs[j], {hook_js});
-                                }}
-                                inputs[j].dispatchEvent(new Event('input', {{bubbles:true}}));
-                                inputs[j].dispatchEvent(new Event('change', {{bubbles:true}}));
-                                break;
-                            }}
-                        }}
-                    }} catch(e) {{}}
-                    return true;
+                    var d = document.querySelector('[class*="dialog-YKU5b5xj"]');
+                    if (!d) return;
+                    var ta = d.querySelector('textarea.textarea-x5KHDULU') ||
+                             d.querySelector('textarea');
+                    if (!ta) return;
+                    var ns = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+                    ns.call(ta, {msg_js});
+                    ta.dispatchEvent(new Event('input', {{bubbles: true}}));
+                    ta.dispatchEvent(new Event('change', {{bubbles: true}}));
                 }})()
             """)
+            await asyncio.sleep(0.3)
 
-        await asyncio.sleep(0.5)
+            # "Apply" でメッセージを保存してメインダイアログに戻る
+            await self.evaluate("""
+                (function() {
+                    var d = document.querySelector('[class*="dialog-YKU5b5xj"]');
+                    if (!d) return;
+                    for (var b of d.querySelectorAll('button')) {
+                        if (b.textContent.trim() === 'Apply') { b.click(); return; }
+                    }
+                })()
+            """)
+            await asyncio.sleep(0.8)
 
-        # ── Step 4: Create ボタンをクリック ──
+        # Step 6: Create ボタンをクリック
+        # fetch インターセプターが webhook URL を差し替えてから送信する
         created = await self.evaluate("""
             (function() {
-                var btns = document.querySelectorAll(
-                    'button[data-name="submit"], button');
-                for (var i = 0; i < btns.length; i++) {
-                    if (/^create$/i.test(btns[i].textContent.trim())) {
-                        btns[i].click(); return true;
-                    }
-                }
-                return false;
+                var d = document.querySelector('[class*="dialog-YKU5b5xj"]');
+                if (!d) return false;
+                var submit = d.querySelector('[class*="submitBtn"]');
+                if (!submit) return false;
+                var txt = submit.textContent.trim();
+                if (txt !== 'Create') return false;
+                submit.click();
+                return true;
             })()
         """)
 

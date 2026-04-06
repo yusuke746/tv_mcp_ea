@@ -119,20 +119,28 @@ class AlertManager:
                 continue
             msg = self._build_message(mt5_symbol, level, atr)
             try:
-                # まず REST API を試し、実在確認できない場合は UI 操作にフォールバックする
+                # まず REST API を試す
                 api_ok = await self._cdp.create_price_alert_api(
                     tv_symbol=tv_symbol,
                     price=level["price"],
                     message=msg,
                     direction=level["direction"],  # "long" (tp) または "short" (sl)
+                    webhook_url=self._tv_alert_webhook_url,
                 )
                 verified = await self._has_remote_alert(tv_symbol, level["price"], msg)
 
-                if not verified and api_ok:
-                    logger.warning(
-                        f"REST create not visible in list_alerts: {mt5_symbol} @ {level['price']:.5f} "
-                        f"— trying UI fallback"
-                    )
+                if not verified:
+                    # REST API で作成できなかった場合は UI 操作にフォールバックする
+                    if api_ok:
+                        logger.warning(
+                            f"REST create not visible in list_alerts: {mt5_symbol} @ {level['price']:.5f} "
+                            f"— trying UI fallback"
+                        )
+                    else:
+                        logger.debug(
+                            f"REST API failed: {mt5_symbol} @ {level['price']:.5f} "
+                            f"— trying UI fallback"
+                        )
                     ui_ok = await self._cdp.create_price_alert_ui(
                         price=level["price"],
                         message=msg,
@@ -203,6 +211,7 @@ class AlertManager:
         - [MCP-EA] タグ付きのアラート
         - メッセージなし（UI作成失敗の残骸）
         - active=False（Stopped/Triggered 状態で再利用不可）
+        - tv_alert_webhook_url と異なる web_hook を持つアラート（stale URL 対策）
 
         REST API (pricealerts.tradingview.com) を使用して高速に削除する。
         """
@@ -218,13 +227,22 @@ class AlertManager:
             msg = alert.get("message", "")
             sym = alert.get("symbol", "")
             active = alert.get("active", True)
+            alert_webhook = alert.get("web_hook", "")
             is_our_symbol = tv_symbol in sym or sym_short in sym
 
-            # [MCP-EA] タグ付き、またはメッセージ未設定、またはStopped/Triggered を削除対象
+            # webhook URL が違う（ngrok 等）アラートは削除
+            wrong_webhook = (
+                bool(self._tv_alert_webhook_url)
+                and bool(alert_webhook)
+                and alert_webhook != self._tv_alert_webhook_url
+            )
+
+            # [MCP-EA] タグ付き、またはメッセージ未設定、またはStopped/Triggered、またはURL違い を削除対象
             is_mcp_alert = (
                 (_TAG in msg)
                 or (not msg and is_our_symbol)
                 or (active is False)
+                or wrong_webhook
             )
 
             if is_our_symbol and is_mcp_alert:
