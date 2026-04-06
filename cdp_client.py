@@ -410,13 +410,19 @@ class CDPClient:
                             }}
                         }} catch(e) {{}}
                     }}
-                    // create_alert POST の webhook を差し替え
+                    // create_alert POST の price / webhook を差し替え
                     if (urlStr.includes('pricealerts') && urlStr.includes('create_alert') &&
-                        opts && opts.body && window.__tvMcpWebhookUrl) {{
+                        opts && opts.body) {{
                         try {{
                             var body = JSON.parse(opts.body);
                             if (body.payload) {{
-                                body.payload.web_hook = window.__tvMcpWebhookUrl;
+                                // price: React の内部状態（ダイアログのデフォルト値）を正しい値で上書き
+                                if (window.__tvMcpAlertPrice != null) {{
+                                    body.payload.price = window.__tvMcpAlertPrice;
+                                }}
+                                if (window.__tvMcpWebhookUrl) {{
+                                    body.payload.web_hook = window.__tvMcpWebhookUrl;
+                                }}
                                 opts = Object.assign({{}}, opts, {{body: JSON.stringify(body)}});
                             }}
                         }} catch(e) {{}}
@@ -570,9 +576,11 @@ class CDPClient:
         fetch インターセプターで webhook URL を差し替えるため、Notifications パネルへの
         ナビゲーションは不要。
         """
-        # Step 1: fetch インターセプターを設置（webhook URL を差し替え）
-        if webhook_url:
-            await self._install_pricealerts_interceptors(webhook_url)
+        # Step 1: fetch インターセプターを設置（webhook URL と price を差し替え）
+        await self._install_pricealerts_interceptors(webhook_url)
+        # ダイアログが開いたデフォルト価格（現在価格）を正しい価格で上書きするため
+        # window.__tvMcpAlertPrice に設定しておく（インターセプターが create_alert 送信時に注入）
+        await self.evaluate(f"window.__tvMcpAlertPrice = {price!r};")
 
         # Step 2: 既存ダイアログをすべて閉じる
         await self.evaluate("""
@@ -681,6 +689,8 @@ class CDPClient:
         """)
 
         await asyncio.sleep(0.5)
+        # 使用済みの price をクリア（次のアラートに誤って引き継がないため）
+        await self.evaluate("window.__tvMcpAlertPrice = null;")
         return bool(created)
 
     # ------------------------------------------------------------------ #
