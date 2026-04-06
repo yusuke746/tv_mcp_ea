@@ -9,9 +9,12 @@ TradingView デスクトップの CDP が利用可能な場合は
 """
 
 import asyncio
+import gzip
 import os
+import shutil
 import signal
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -123,6 +126,20 @@ class TVMcpEA:
             max_instances=1,
             misfire_grace_time=60,
         )
+
+        # ログメンテナンスジョブ（毎日指定時刻に実行）
+        log_cfg = self._cfg.get("logs", {})
+        maint_hour = int(log_cfg.get("maintenance_hour", 1))
+        self._scheduler.add_job(
+            self._log_maintenance_job,
+            trigger="cron",
+            hour=maint_hour,
+            minute=0,
+            id="log_maintenance",
+            max_instances=1,
+            misfire_grace_time=3600,
+        )
+
         self._scheduler.start()
         logger.info(f"Scheduler started. Scan interval: {self._scan_interval}s")
 
@@ -149,6 +166,57 @@ class TVMcpEA:
             await self._cdp.disconnect()
         self._data_feed.disconnect()
         logger.info("TV MCP EA stopped.")
+
+    # ─── ログメンテナンス ────────────────────────────────────────────────────
+
+    async def _log_maintenance_job(self) -> None:
+        """古いログを圧縮・削除する日次メンテナンスジョブ。"""
+        log_cfg = self._cfg.get("logs", {})
+        compress_after = int(log_cfg.get("compress_after_days", 3))
+        delete_after   = int(log_cfg.get("delete_after_days", 30))
+
+        log_dir = Path(__file__).parent / "logs"
+        if not log_dir.exists():
+            return
+
+        now = datetime.now()
+        compressed = 0
+        deleted = 0
+
+        for log_file in log_dir.iterdir():
+            if not log_file.is_file():
+                continue
+            age_days = (now - datetime.fromtimestamp(log_file.stat().st_mtime)).days
+
+            # .gz ファイルは削除対象のみチェック
+            if log_file.suffix == ".gz":
+                if age_days >= delete_after:
+                    log_file.unlink()
+                    deleted += 1
+                continue
+
+            # 生ログ: delete_after を超えたらそのまま削除
+            if age_days >= delete_after:
+                log_file.unlink()
+                deleted += 1
+                continue
+
+            # 生ログ: compress_after を超えたら gzip 圧縮
+            if age_days >= compress_after:
+                gz_path = log_file.with_suffix(log_file.suffix + ".gz")
+                if gz_path.exists():
+                    # すでに圧縮済み → 元ファイルだけ削除
+                    log_file.unlink()
+                else:
+                    with log_file.open("rb") as f_in, gzip.open(gz_path, "wb") as f_out:
+                        shutil.copyfileobj(f_in, f_out)
+                    log_file.unlink()
+                compressed += 1
+
+        logger.info(
+            f"[LogMaintenance] compressed={compressed} deleted={deleted} "
+            f"(compress_after={compress_after}d, delete_after={delete_after}d)"
+        )
 
     # ─── CDP 接続管理 ───────────────────────────────────────────────────────
 

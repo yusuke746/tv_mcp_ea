@@ -127,7 +127,10 @@ class AlertManager:
                         f"@ {level['price']:.5f} ({level['pattern']})"
                     )
                 else:
-                    logger.warning(f"Alert creation failed (REST API): {mt5_symbol} @ {level['price']}")
+                    logger.warning(
+                        f"Alert creation failed (REST API): {mt5_symbol} @ {level['price']} "
+                        f"response={ok!r}"
+                    )
             except CDPError as e:
                 logger.warning(f"Alert creation failed: {e}")
 

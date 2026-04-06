@@ -463,7 +463,8 @@ class CDPClient:
                         body: params.toString()
                     }});
                     var d = await r.json();
-                    return (d.s === 'ok') ? (d.r || true) : false;
+                    if (d.s !== 'ok') {{ return JSON.stringify(d); }}
+                    return (d.r || true);
                 }} catch(e) {{ return false; }}
             }})()
             """,

@@ -90,6 +90,11 @@ drawing:
   channel_color: "#9C27B0"
   line_width: 2
 
+logs:
+  compress_after_days: 3      # N日より古いログを gzip 圧縮
+  delete_after_days: 30       # N日より古い圧縮ログを削除
+  maintenance_hour: 1         # 日次メンテ実行時刻（ローカル時）
+
 # MT5接続設定（fx_systemの.envと共有可能）
 mt5:
   login_env: "MT5_LOGIN"
