@@ -422,8 +422,9 @@ class CDPClient:
                         try {{
                             var body = JSON.parse(opts.body);
                             if (body.payload) {{
-                                // price: React の内部状態（ダイアログのデフォルト値）を正しい値で上書き
-                                if (window.__tvMcpAlertPrice != null) {{
+                                // price: UI フロー専用フラグが立っている時のみ上書き
+                                // (REST API 直接呼び出し時は price が正しく設定済みのため上書き不要)
+                                if (window.__tvMcpUiAlertActive && window.__tvMcpAlertPrice != null) {{
                                     body.payload.price = window.__tvMcpAlertPrice;
                                 }}
                                 if (window.__tvMcpWebhookUrl) {{
@@ -585,9 +586,11 @@ class CDPClient:
         """
         # Step 1: fetch インターセプターを設置（webhook URL と price を差し替え）
         await self._install_pricealerts_interceptors(webhook_url)
-        # ダイアログが開いたデフォルト価格（現在価格）を正しい価格で上書きするため
-        # window.__tvMcpAlertPrice に設定しておく（インターセプターが create_alert 送信時に注入）
-        await self.evaluate(f"window.__tvMcpAlertPrice = {price!r};")
+        # UI フロー専用フラグを ON にする（REST API 直接呼び出しと区別するため）
+        await self.evaluate(f"""
+            window.__tvMcpAlertPrice = {price!r};
+            window.__tvMcpUiAlertActive = true;
+        """)
 
         # Step 2: 既存ダイアログをすべて閉じる
         await self.evaluate("""
@@ -696,8 +699,8 @@ class CDPClient:
         """)
 
         await asyncio.sleep(0.5)
-        # 使用済みの price をクリア（次のアラートに誤って引き継がないため）
-        await self.evaluate("window.__tvMcpAlertPrice = null;")
+        # 使用済みのフラグをクリア（REST API の次の呼び出しに誤って影響しないため）
+        await self.evaluate("window.__tvMcpAlertPrice = null; window.__tvMcpUiAlertActive = false;")
         return bool(created)
 
     # ------------------------------------------------------------------ #
