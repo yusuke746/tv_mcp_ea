@@ -348,6 +348,11 @@ class AlertManager:
                         )
                         self._forwarded_alert_ids.add(alert_id)
                         forwarded += 1
+                        # 転送済みアラートを削除（Stopped-Triggered の残骸を一掃）
+                        try:
+                            await self._cdp.delete_alert(alert_id)
+                        except CDPError:
+                            pass
                     else:
                         body = await resp.text()
                         logger.warning(

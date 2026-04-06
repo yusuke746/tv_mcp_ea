@@ -393,12 +393,18 @@ class CDPClient:
         hook_js = json.dumps(webhook_url) if webhook_url else "null"
         result = await self.evaluate(f"""
             (function() {{
-                // webhook URL を更新（既存インターセプターがあれば更新のみ）
+                // webhook URL を更新
                 window.__tvMcpWebhookUrl = {hook_js};
 
-                if (window.__tvMcpInterceptorInstalled) return 'updated';
+                // バージョンが一致しない場合は再インストール（price 差し替えコードの有無を確認）
+                var CURRENT_VERSION = 2;
+                if (window.__tvMcpInterceptorInstalled &&
+                    window.__tvMcpInterceptorVersion === CURRENT_VERSION) {{
+                    return 'updated';
+                }}
 
-                var origFetch = window.fetch;
+                var origFetch = window.__tvMcpOrigFetch || window.fetch;
+                window.__tvMcpOrigFetch = origFetch;  // 元の fetch を保存
                 window.fetch = function(url, opts) {{
                     var urlStr = url ? url.toString() : '';
                     // pricealerts の URL パラメータをキャプチャ（list_alerts, create_alert 両方から）
@@ -430,6 +436,7 @@ class CDPClient:
                     return origFetch.call(this, url, opts);
                 }};
                 window.__tvMcpInterceptorInstalled = true;
+                window.__tvMcpInterceptorVersion = CURRENT_VERSION;
                 return 'installed';
             }})()
         """)
