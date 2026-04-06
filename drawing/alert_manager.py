@@ -113,13 +113,28 @@ class AlertManager:
                 continue
             msg = self._build_message(mt5_symbol, level, atr)
             try:
-                # REST API で確実にメッセージ付きで作成（asyncio.sleep なし）
-                ok = await self._cdp.create_price_alert_api(
+                # まず REST API を試し、実在確認できない場合は UI 操作にフォールバックする
+                api_ok = await self._cdp.create_price_alert_api(
                     tv_symbol=tv_symbol,
                     price=level["price"],
                     message=msg,
                 )
-                if ok:
+                verified = await self._has_remote_alert(tv_symbol, level["price"], msg)
+
+                if not verified and api_ok:
+                    logger.warning(
+                        f"REST create not visible in list_alerts: {mt5_symbol} @ {level['price']:.5f} "
+                        f"— trying UI fallback"
+                    )
+                    ui_ok = await self._cdp.create_price_alert_ui(
+                        price=level["price"],
+                        message=msg,
+                    )
+                    verified = ui_ok or await self._has_remote_alert(tv_symbol, level["price"], msg)
+                else:
+                    ui_ok = False
+
+                if verified or ui_ok:
                     created_ids.append(f"{mt5_symbol}_{level['price']:.5f}")
                     existing_prices.add(price_rounded)
                     logger.info(
@@ -128,8 +143,8 @@ class AlertManager:
                     )
                 else:
                     logger.warning(
-                        f"Alert creation failed (REST API): {mt5_symbol} @ {level['price']} "
-                        f"response={ok!r}"
+                        f"Alert creation failed: {mt5_symbol} @ {level['price']:.5f} "
+                        f"api_ok={api_ok!r}"
                     )
             except CDPError as e:
                 logger.warning(f"Alert creation failed: {e}")
@@ -214,6 +229,28 @@ class AlertManager:
             _save_state(state)
 
         return deleted
+
+    async def _has_remote_alert(self, tv_symbol: str, price: float, message: str) -> bool:
+        """pricealerts 一覧に対象アラートが実在するか確認する。"""
+        try:
+            alerts = await self._cdp.list_alerts()
+        except CDPError:
+            return False
+
+        sym_short = tv_symbol.split(":")[-1]
+        price_rounded = round(price, 2)
+        for alert in alerts:
+            symbol = alert.get("symbol", "")
+            alert_price = round(float(alert.get("price", 0) or 0), 2)
+            alert_message = alert.get("message", "")
+            if not (tv_symbol in symbol or sym_short in symbol):
+                continue
+            if alert_price != price_rounded:
+                continue
+            if alert_message != message:
+                continue
+            return True
+        return False
 
     def _pick_levels(
         self,
