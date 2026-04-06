@@ -145,7 +145,29 @@ class AlertManager:
         }
         _save_state(state)
 
-        logger.info(f"{mt5_symbol}: {len(created_ids)} alerts set")
+        remote_count: int | None = None
+        try:
+            remote_alerts = await self._cdp.list_alerts()
+            sym_short = tv_symbol.split(":")[-1]
+            remote_count = sum(
+                1
+                for a in remote_alerts
+                if (tv_symbol in a.get("symbol", "") or sym_short in a.get("symbol", ""))
+                and _TAG in a.get("message", "")
+            )
+        except CDPError:
+            pass
+
+        if remote_count is None:
+            logger.info(f"{mt5_symbol}: {len(created_ids)} alerts set")
+        else:
+            logger.info(
+                f"{mt5_symbol}: {len(created_ids)} alerts set, remote_pricealerts={remote_count}"
+            )
+            if created_ids and remote_count == 0:
+                logger.warning(
+                    f"{mt5_symbol}: alert create reported success but list_alerts returned 0 entries"
+                )
         return len(created_ids)
 
     # ──────────────────────────────────────────────────────────────────────────
