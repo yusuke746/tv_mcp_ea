@@ -437,20 +437,32 @@ class CDPClient:
         """, timeout=10)
         return bool(result)
 
-    async def create_price_alert_api(self, tv_symbol: str, price: float, message: str) -> bool:
+    async def create_price_alert_api(self, tv_symbol: str, price: float, message: str, direction: str = "long") -> bool:
         """
         REST API 経由で TV 価格アラートを作成する（UIより高速・確実）。
         メッセージが確実に設定されるため [MCP-EA] タグによる削除が機能する。
+
+        Args:
+            direction: "long" (>価格) or "short" (<価格) — 一発型 crossing ではなく方向付き条件
         """
         sym_json = json.dumps({"symbol": tv_symbol, "adjustment": "splits"})
         name = f"{tv_symbol.split(':')[-1]} MCP @ {price:.2f}"
+        
+        # direction に応じた条件タイプ
+        # "long" = greater_than: 価格が上から降ってくることを検知（ロングのTP）
+        # "short" = less_than: 価格が下から上ってくることを検知（ロングのSL）
+        if direction == "long":
+            condition_type = "greater_than"
+        else:
+            condition_type = "less_than"
+
         result = await self.evaluate(
             f"""
             (async function() {{
                 try {{
                     var params = new URLSearchParams();
                     params.set('symbol', '=' + {json.dumps(sym_json)});
-                    params.set('condition', JSON.stringify({{type:'crossing',value:{price}}}));
+                    params.set('condition', JSON.stringify({{type:'{condition_type}',value:{price}}}));
                     params.set('price', String({price}));
                     params.set('name', {json.dumps(name)});
                     params.set('message', {json.dumps(message)});

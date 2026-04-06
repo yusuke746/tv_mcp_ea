@@ -118,6 +118,7 @@ class AlertManager:
                     tv_symbol=tv_symbol,
                     price=level["price"],
                     message=msg,
+                    direction=level["direction"],  # "long" (tp) または "short" (sl)
                 )
                 verified = await self._has_remote_alert(tv_symbol, level["price"], msg)
 
@@ -191,7 +192,10 @@ class AlertManager:
 
     async def _delete_old_alerts(self, tv_symbol: str) -> int:
         """
-        TV アラート一覧から _TAG タグ付きかつ対象シンボルのアラートを削除する。
+        TV アラート一覧から対象シンボルの MCP-EA 管理アラートを削除する。
+        - [MCP-EA] タグ付きのアラート
+        - メッセージなし（UI作成失敗の残骸）
+        - active=False（Stopped/Triggered 状態で再利用不可）
 
         REST API (pricealerts.tradingview.com) を使用して高速に削除する。
         """
@@ -206,21 +210,34 @@ class AlertManager:
         for alert in all_alerts:
             msg = alert.get("message", "")
             sym = alert.get("symbol", "")
+            active = alert.get("active", True)
             is_our_symbol = tv_symbol in sym or sym_short in sym
-            # [MCP-EA] タグ付き、またはメッセージ未設定（UI作成失敗の残骸）を削除
-            is_mcp_alert = _TAG in msg or (not msg and is_our_symbol)
-            if is_our_symbol and (_TAG in msg or not msg):
+
+            # [MCP-EA] タグ付き、またはメッセージ未設定、またはStopped/Triggered を削除対象
+            is_mcp_alert = (
+                (_TAG in msg)
+                or (not msg and is_our_symbol)
+                or (active is False)
+            )
+
+            if is_our_symbol and is_mcp_alert:
                 aid = alert.get("alert_id")
                 if aid:
                     try:
                         ok = await self._cdp.delete_alert(aid)
                         if ok:
                             deleted += 1
-                    except CDPError:
-                        pass
+                        else:
+                            logger.debug(f"delete_alert returned False for {aid}")
+                    except CDPError as e:
+                        logger.debug(f"delete_alert failed for {aid}: {e}")
 
         if deleted:
-            logger.info(f"Deleted {deleted} old alerts for {tv_symbol}")
+            logger.info(
+                f"Deleted {deleted} old alerts for {tv_symbol} (tagged/message-less/stopped)"
+            )
+        else:
+            logger.debug(f"No old alerts to delete for {tv_symbol}")
 
         # ローカル状態もクリア
         state = _load_state()
