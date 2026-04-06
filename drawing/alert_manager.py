@@ -7,13 +7,18 @@ TradingView アラート管理モジュール。
 古いアラートは毎スキャン先頭で削除してから新しいレベルを設定する。
 アラートメッセージに fx_system が解釈可能な JSON ペイロードを埋め込む。
 
-TV アラートの webhook 配信を有効にするには、TradingView の設定で
-webhook URL (例: http://<公開IP>:8000/webhook/tv_alert) を設定すること。
+■ ローカル webhook 転送について
+  TradingView のア ラート webhook はTradingView のサーバーから送信されるため、
+  localhost や 192.168.x.x 等のプライベートアドレスは到達できない。
+  本モジュールは pricealerts API を定期ポーリングし、[MCP-EA] アラートが
+  発火（active=False）したタイミングで fx_system へ直接 POST する。
 """
 
 import json
 import logging
 from pathlib import Path
+
+import aiohttp
 
 from cdp_client import CDPClient, CDPError
 from detection.sr_levels import SRLevel
@@ -56,10 +61,20 @@ class AlertManager:
         cdp: CDPClient,
         max_alerts_per_symbol: int = 4,
         tv_alert_webhook_url: str = "",
+        local_tv_alert_url: str = "",
     ):
         self._cdp = cdp
         self._max_per_sym = max_alerts_per_symbol
         self._tv_alert_webhook_url = tv_alert_webhook_url or ""
+        # ローカル転送先 URL (localhost 等、TV サーバーから到達できない場合に使用)
+        self._local_tv_alert_url = local_tv_alert_url or tv_alert_webhook_url or ""
+        # 転送済みアラートID（再起動するまで保持、重複転送防止）
+        self._forwarded_alert_ids: set = set()
+
+    def update_webhook_url(self, url: str) -> None:
+        """webhook URL を動的に更新する（ngrok URL が変わった場合に呼び出す）。"""
+        self._tv_alert_webhook_url = url
+        self._local_tv_alert_url = url
 
     async def update_alerts(
         self,
@@ -237,15 +252,21 @@ class AlertManager:
                 and alert_webhook != self._tv_alert_webhook_url
             )
 
-            # [MCP-EA] タグ付き、またはメッセージ未設定、またはStopped/Triggered、またはURL違い を削除対象
-            is_mcp_alert = (
-                (_TAG in msg)
-                or (not msg and is_our_symbol)
-                or (active is False)
-                or wrong_webhook
+            is_triggered = not active  # False / None → triggered (Stopped)
+
+            # 削除条件:
+            #   1. [MCP-EA] タグ付き & 発火済み（全シンボル対象 — 他シンボル残骸も一掃）
+            #   2. 現シンボルの [MCP-EA] アラート（active 問わず毎スキャン更新）
+            #   3. 現シンボルのメッセージなしアラート（UI 作成失敗の残骸）
+            #   4. [MCP-EA] タグ付き & webhook URL 違い（ngrok URL 残骸等）
+            should_delete = (
+                (_TAG in msg and is_triggered)      # 全シンボルの triggered MCP-EA
+                or (is_our_symbol and _TAG in msg)  # 現シンボルの全 MCP-EA
+                or (is_our_symbol and not msg)      # 現シンボルの空メッセージ
+                or (_TAG in msg and wrong_webhook)  # webhook URL 違いの MCP-EA
             )
 
-            if is_our_symbol and is_mcp_alert:
+            if should_delete:
                 aid = alert.get("alert_id")
                 if aid:
                     try:
@@ -271,6 +292,83 @@ class AlertManager:
             _save_state(state)
 
         return deleted
+
+    async def forward_triggered_alerts(self) -> int:
+        """
+        発火済み（active=False）の [MCP-EA] アラートを検出し、
+        ローカル webhook URL（localhost 等）に転送する。
+
+        TradingView のクラウドサーバーは localhost へ到達できないため、
+        tv_mcp_ea が代わりにポーリングして直接 POST する。
+
+        Returns:
+            転送したアラート数
+        """
+        if not self._local_tv_alert_url:
+            return 0
+
+        try:
+            all_alerts = await self._cdp.list_alerts()
+        except CDPError:
+            return 0
+
+        forwarded = 0
+        for alert in all_alerts:
+            msg = alert.get("message", "")
+            active = alert.get("active", True)
+            alert_id = alert.get("alert_id")
+
+            # [MCP-EA] タグ付き & 発火済みのみ対象
+            if not (_TAG in msg and not active):
+                continue
+
+            # 既に転送済みの場合はスキップ
+            if alert_id in self._forwarded_alert_ids:
+                continue
+
+            # メッセージからJSONペイロードを抽出
+            payload = self._extract_json_payload(msg)
+            if not payload:
+                logger.debug(f"No JSON payload found in alert {alert_id}, skipping forward")
+                self._forwarded_alert_ids.add(alert_id)  # 再試行しない
+                continue
+
+            try:
+                async with aiohttp.ClientSession() as session:
+                    resp = await session.post(
+                        self._local_tv_alert_url,
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=5),
+                    )
+                    if resp.status < 400:
+                        logger.info(
+                            f"Forwarded triggered alert {alert_id} "
+                            f"({payload.get('pair', '?')} {payload.get('direction', '?')}) "
+                            f"→ {self._local_tv_alert_url} [{resp.status}]"
+                        )
+                        self._forwarded_alert_ids.add(alert_id)
+                        forwarded += 1
+                    else:
+                        body = await resp.text()
+                        logger.warning(
+                            f"Forward alert {alert_id} returned {resp.status}: {body[:200]}"
+                        )
+            except Exception as e:
+                logger.warning(f"Failed to forward alert {alert_id}: {e}")
+
+        return forwarded
+
+    @staticmethod
+    def _extract_json_payload(message: str) -> dict | None:
+        """アラートメッセージの本文から JSON ペイロードを抽出する。"""
+        for line in message.split("\n"):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    return json.loads(line)
+                except json.JSONDecodeError:
+                    pass
+        return None
 
     async def _has_remote_alert(self, tv_symbol: str, price: float, message: str) -> bool:
         """pricealerts 一覧に対象アラートが実在するか確認する。"""

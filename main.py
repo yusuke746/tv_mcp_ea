@@ -115,6 +115,9 @@ class TVMcpEA:
             logger.error("MT5 connection failed. Exiting.")
             return
 
+        # ngrok URL を解決して AlertManager に設定
+        await self._refresh_ngrok_url()
+
         # CDP 接続（失敗しても続行）
         await self._try_connect_cdp()
 
@@ -221,6 +224,51 @@ class TVMcpEA:
 
     # ─── CDP 接続管理 ───────────────────────────────────────────────────────
 
+    async def _refresh_ngrok_url(self) -> str | None:
+        """
+        ngrok ローカル API から現在の公開 URL を取得し、
+        AlertManager の webhook URL を更新する。
+
+        ngrok が停止中の場合は config の tv_alert_webhook_url にフォールバックする。
+        Returns: 解決した webhook URL（更新なしの場合は None）
+        """
+        sys_cfg = self._cfg["system"]
+        ngrok_api = sys_cfg.get("ngrok_local_api", "http://localhost:4040")
+        path = sys_cfg.get("tv_alert_webhook_path", "/webhook/tv_alert")
+        fallback = sys_cfg.get("tv_alert_webhook_url", "")
+
+        import aiohttp as _aiohttp
+        try:
+            async with _aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{ngrok_api}/api/tunnels",
+                    timeout=_aiohttp.ClientTimeout(total=3),
+                ) as resp:
+                    if resp.status != 200:
+                        raise ValueError(f"ngrok API returned {resp.status}")
+                    data = await resp.json()
+
+            tunnels = data.get("tunnels", [])
+            # HTTPS トンネルを優先して取得
+            https_tunnel = next(
+                (t for t in tunnels if t.get("proto") == "https"),
+                tunnels[0] if tunnels else None,
+            )
+            if not https_tunnel:
+                raise ValueError("No tunnels found in ngrok API response")
+
+            public_url = https_tunnel["public_url"].rstrip("/")
+            webhook_url = public_url + path
+            self._alert_mgr.update_webhook_url(webhook_url)
+            logger.info(f"ngrok webhook URL resolved: {webhook_url}")
+            return webhook_url
+
+        except Exception as e:
+            logger.warning(f"ngrok URL resolution failed: {e} — using fallback: {fallback!r}")
+            if fallback:
+                self._alert_mgr.update_webhook_url(fallback)
+            return None
+
     async def _try_connect_cdp(self) -> bool:
         if self._cdp_connected:
             return True
@@ -240,6 +288,9 @@ class TVMcpEA:
         logger.info("=== Scan cycle start ===")
         det_cfg = self._cfg["detection"]
         chart_index_map: dict[str, int] = {}
+
+        # ngrok URL を毎スキャンで確認（ngrok 再起動時に URL が変わる場合に対応）
+        await self._refresh_ngrok_url()
 
         if self._cdp_connected:
             try:
@@ -267,6 +318,17 @@ class TVMcpEA:
                 )
             except Exception as e:
                 logger.error(f"Error scanning {mt5_sym}: {e}", exc_info=True)
+
+        # ─── 発火済みアラートのローカル転送 ─────────────────────────────────
+        # TV のクラウドサーバーは localhost に到達できないため、
+        # tv_mcp_ea が代わりに pricealerts API をポーリングして直接転送する。
+        if self._cdp_connected and self._alerts_enabled:
+            try:
+                forwarded = await self._alert_mgr.forward_triggered_alerts()
+                if forwarded:
+                    logger.info(f"Forwarded {forwarded} triggered TV alert(s) to local webhook")
+            except Exception as e:
+                logger.warning(f"Alert forward failed: {e}")
 
         logger.info("=== Scan cycle end ===")
 

@@ -4,7 +4,13 @@ system:
   cdp_port: 9222
   fx_system_webhook_url: "http://localhost:80/webhook/mcp"
   fx_system_context_webhook_url: "http://localhost:80/webhook/mcp_context"
-  tv_alert_webhook_url: "http://localhost:80/webhook/tv_alert"
+  # tv_alert_webhook_url: ngrok が有効な場合は起動時に自動解決される
+  # ngrok が停止中のフォールバック。ngrok 使用時は空のままでもよい
+  tv_alert_webhook_url: ""
+  # ngrok ローカル API（ngrok が動いている場合は自動で公開 URL を取得）
+  ngrok_local_api: "http://localhost:4040"
+  # TV アラート webhook の path（ngrok URL に付加される）
+  tv_alert_webhook_path: "/webhook/tv_alert"
   log_level: "INFO"
   state_file: "state/drawing_state.json"
 
