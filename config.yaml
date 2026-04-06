@@ -4,6 +4,7 @@ system:
   cdp_port: 9222
   fx_system_webhook_url: "http://localhost:80/webhook/mcp"
   fx_system_context_webhook_url: "http://localhost:80/webhook/mcp_context"
+  tv_alert_webhook_url: "http://localhost:80/webhook/tv_alert"
   log_level: "INFO"
   state_file: "state/drawing_state.json"
 

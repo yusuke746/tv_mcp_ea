@@ -484,7 +484,7 @@ class CDPClient:
         )
         return bool(result)
 
-    async def create_price_alert_ui(self, price: float, message: str) -> bool:
+    async def create_price_alert_ui(self, price: float, message: str, webhook_url: str = "") -> bool:
         """
         TV のアラート作成ダイアログを操作して価格アラートを作成する（フォールバック用）。
         """
@@ -552,6 +552,54 @@ class CDPClient:
                 }}
             }})()
         """)
+
+        # ── Step 3.5: Webhook URL を有効化して入力（可能な場合） ──
+        if webhook_url:
+            hook_js = json.dumps(webhook_url)
+            await self.evaluate(f"""
+                (function() {{
+                    try {{
+                        var root = document.querySelector('[class*="alert"]') || document.body;
+
+                        // Webhook URL 行のトグルを ON にする
+                        var labels = root.querySelectorAll('label, span, div');
+                        for (var i = 0; i < labels.length; i++) {{
+                            var txt = (labels[i].textContent || '').trim();
+                            if (!/webhook\\s*url/i.test(txt)) continue;
+                            var row = labels[i].closest('label, [class*="row"], [class*="item"]') || labels[i].parentElement;
+                            if (!row) continue;
+                            var cb = row.querySelector('input[type="checkbox"]');
+                            if (cb && !cb.checked) {{ cb.click(); }}
+                            else if (!cb) {{
+                                var roleCb = row.querySelector('[role="checkbox"]');
+                                if (roleCb && roleCb.getAttribute('aria-checked') === 'false') roleCb.click();
+                            }}
+                            break;
+                        }}
+
+                        // URL 入力欄に値をセット
+                        var inputs = root.querySelectorAll('input[type="url"], input[type="text"], textarea');
+                        for (var j = 0; j < inputs.length; j++) {{
+                            var ph = (inputs[j].getAttribute('placeholder') || '').toLowerCase();
+                            var nm = (inputs[j].getAttribute('name') || '').toLowerCase();
+                            var aria = (inputs[j].getAttribute('aria-label') || '').toLowerCase();
+                            if (ph.indexOf('http') >= 0 || ph.indexOf('webhook') >= 0 || nm.indexOf('webhook') >= 0 || aria.indexOf('webhook') >= 0) {{
+                                if (inputs[j].tagName.toLowerCase() === 'textarea') {{
+                                    var ts = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+                                    ts.call(inputs[j], {hook_js});
+                                }} else {{
+                                    var is = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                                    is.call(inputs[j], {hook_js});
+                                }}
+                                inputs[j].dispatchEvent(new Event('input', {{bubbles:true}}));
+                                inputs[j].dispatchEvent(new Event('change', {{bubbles:true}}));
+                                break;
+                            }}
+                        }}
+                    }} catch(e) {{}}
+                    return true;
+                }})()
+            """)
 
         await asyncio.sleep(0.5)
 

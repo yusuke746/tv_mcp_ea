@@ -97,6 +97,7 @@ class TVMcpEA:
         self._alert_mgr = AlertManager(
             cdp=self._cdp,
             max_alerts_per_symbol=int(alert_cfg.get("max_per_symbol", 4)),
+            tv_alert_webhook_url=sys_cfg.get("tv_alert_webhook_url", ""),
         )
         self._alerts_enabled = bool(alert_cfg.get("enabled", True))
 

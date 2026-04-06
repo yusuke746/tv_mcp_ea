@@ -51,9 +51,15 @@ class AlertManager:
     - アラートメッセージは JSON 文字列で fx_system が解釈可能
     """
 
-    def __init__(self, cdp: CDPClient, max_alerts_per_symbol: int = 4):
+    def __init__(
+        self,
+        cdp: CDPClient,
+        max_alerts_per_symbol: int = 4,
+        tv_alert_webhook_url: str = "",
+    ):
         self._cdp = cdp
         self._max_per_sym = max_alerts_per_symbol
+        self._tv_alert_webhook_url = tv_alert_webhook_url or ""
 
     async def update_alerts(
         self,
@@ -130,6 +136,7 @@ class AlertManager:
                     ui_ok = await self._cdp.create_price_alert_ui(
                         price=level["price"],
                         message=msg,
+                        webhook_url=self._tv_alert_webhook_url,
                     )
                     verified = ui_ok or await self._has_remote_alert(tv_symbol, level["price"], msg)
                 else:
