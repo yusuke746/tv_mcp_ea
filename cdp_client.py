@@ -397,7 +397,7 @@ class CDPClient:
                 window.__tvMcpWebhookUrl = {hook_js};
 
                 // バージョンが一致しない場合は再インストール（price 差し替えコードの有無を確認）
-                var CURRENT_VERSION = 2;
+                var CURRENT_VERSION = 3;
                 if (window.__tvMcpInterceptorInstalled &&
                     window.__tvMcpInterceptorVersion === CURRENT_VERSION) {{
                     return 'updated';
@@ -423,9 +423,14 @@ class CDPClient:
                             var body = JSON.parse(opts.body);
                             if (body.payload) {{
                                 // price: UI フロー専用フラグが立っている時のみ上書き
-                                // (REST API 直接呼び出し時は price が正しく設定済みのため上書き不要)
+                                // TV が実際に使う価格フィールドは conditions[0].series[1].value
                                 if (window.__tvMcpUiAlertActive && window.__tvMcpAlertPrice != null) {{
-                                    body.payload.price = window.__tvMcpAlertPrice;
+                                    if (body.payload.conditions &&
+                                        body.payload.conditions[0] &&
+                                        body.payload.conditions[0].series &&
+                                        body.payload.conditions[0].series[1]) {{
+                                        body.payload.conditions[0].series[1].value = window.__tvMcpAlertPrice;
+                                    }}
                                 }}
                                 if (window.__tvMcpWebhookUrl) {{
                                     body.payload.web_hook = window.__tvMcpWebhookUrl;
@@ -437,7 +442,7 @@ class CDPClient:
                     return origFetch.call(this, url, opts);
                 }};
                 window.__tvMcpInterceptorInstalled = true;
-                window.__tvMcpInterceptorVersion = CURRENT_VERSION;
+                window.__tvMcpInterceptorVersion = 3;
                 return 'installed';
             }})()
         """)
