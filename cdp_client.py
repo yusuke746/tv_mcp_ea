@@ -477,6 +477,7 @@ class CDPClient:
                             alert_id: a.alert_id,
                             symbol: sym,
                             raw_symbol: rawSym,
+                            type: a.type || 'price',
                             message: a.message || '',
                             price: a.price || 0,
                             active: a.active,
@@ -553,6 +554,9 @@ class CDPClient:
         deleted = 0
         failed = 0
         for alert in all_alerts:
+            # type が 'price' のアラートのみ対象（indicator/strategy は絶対に削除しない）
+            if alert.get("type", "price") != "price":
+                continue
             msg = alert.get("message", "")
             if "[MCP-EA]" not in msg:
                 continue
