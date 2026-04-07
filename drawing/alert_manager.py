@@ -274,9 +274,12 @@ class AlertManager:
                         if ok:
                             deleted += 1
                         else:
-                            logger.debug(f"delete_alert returned False for {aid}")
+                            logger.warning(
+                                f"delete_alert returned False for {aid} "
+                                f"(sym={sym!r} msg={msg[:60]!r})"
+                            )
                     except CDPError as e:
-                        logger.debug(f"delete_alert failed for {aid}: {e}")
+                        logger.warning(f"delete_alert CDPError for {aid}: {e}")
 
         if deleted:
             logger.info(

@@ -414,6 +414,13 @@ class CDPClient:
                             if (qIdx >= 0) {{
                                 window.__tvCreateAlertUrlParams = urlStr.substring(qIdx + 1);
                             }}
+                            // URL パラメータがない場合も Authorization ヘッダから token を試みる
+                            if (!window.__tvCreateAlertUrlParams && opts && opts.headers) {{
+                                var hdrs = opts.headers;
+                                var auth = (typeof hdrs.get === 'function' ? hdrs.get('Authorization') :
+                                            hdrs['Authorization'] || hdrs['authorization'] || '');
+                                if (auth) {{ window.__tvPricealertsAuth = auth; }}
+                            }}
                         }} catch(e) {{}}
                     }}
                     // create_alert POST の price / webhook を差し替え
@@ -485,16 +492,17 @@ class CDPClient:
 
     async def delete_alert(self, alert_id) -> bool:
         """指定 alert_id のアラートを削除する。"""
+        # TV API v2: /delete_alerts (複数形) + JSON payload {"payload": {"alert_ids": [...]}}
+        # Cookie 認証のみで動作（URL params / Authorization ヘッダ不要）
         result = await self.evaluate(f"""
             (async function() {{
                 try {{
                     var r = await fetch(
-                        'https://pricealerts.tradingview.com/delete_alert',
+                        'https://pricealerts.tradingview.com/delete_alerts',
                         {{
                             method: 'POST',
                             credentials: 'include',
-                            headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
-                            body: 'alert_id={alert_id}'
+                            body: JSON.stringify({{payload: {{alert_ids: [{alert_id}]}}}})  
                         }}
                     );
                     var d = await r.json();
@@ -503,6 +511,69 @@ class CDPClient:
             }})()
         """, timeout=10)
         return bool(result)
+
+    async def delete_alert_debug(self, alert_id) -> dict:
+        """
+        delete_alert のデバッグ版: レスポンス本文を含む詳細を返す。
+        本番では使わず、トラブルシュート用。
+        """
+        result = await self.evaluate(f"""
+            (async function() {{
+                var out = {{}};
+                try {{
+                    var url = 'https://pricealerts.tradingview.com/delete_alerts';
+                    out.url = url;
+                    var body = JSON.stringify({{payload: {{alert_ids: [{alert_id}]}}}});
+                    out.body_sent = body;
+                    var r = await fetch(url, {{
+                        method: 'POST',
+                        credentials: 'include',
+                        body: body
+                    }});
+                    out.status = r.status;
+                    var text = await r.text();
+                    out.body = text;
+                    try {{ out.parsed = JSON.parse(text); }} catch(e) {{}}
+                }} catch(e) {{
+                    out.error = e.toString();
+                }}
+                return out;
+            }})()
+        """, timeout=10)
+        return result or {}
+
+    async def delete_all_mcp_alerts(self) -> dict:
+        """
+        [MCP-EA] タグを含む全アラートを一括削除する。
+        デバッグ・手動クリーンアップ用。
+        Returns: {{"deleted": N, "failed": M, "details": [...]}}
+        """
+        all_alerts = await self.list_alerts()
+        results = []
+        deleted = 0
+        failed = 0
+        for alert in all_alerts:
+            msg = alert.get("message", "")
+            if "[MCP-EA]" not in msg:
+                continue
+            aid = alert.get("alert_id")
+            if not aid:
+                continue
+            dbg = await self.delete_alert_debug(aid)
+            success = dbg.get("parsed", {}).get("s") == "ok"
+            results.append({
+                "alert_id": aid,
+                "price": alert.get("price"),
+                "symbol": alert.get("symbol"),
+                "success": success,
+                "status": dbg.get("status"),
+                "body": dbg.get("body", "")[:120],
+            })
+            if success:
+                deleted += 1
+            else:
+                failed += 1
+        return {"deleted": deleted, "failed": failed, "details": results}
 
     async def create_price_alert_api(
         self,
