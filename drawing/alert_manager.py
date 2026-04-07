@@ -239,6 +239,10 @@ class AlertManager:
         deleted = 0
         sym_short = tv_symbol.split(":")[-1]
         for alert in all_alerts:
+            # type が price 以外（indicator / strategy）は絶対に削除しない
+            if alert.get("type", "price") != "price":
+                continue
+
             msg = alert.get("message", "")
             sym = alert.get("symbol", "")
             active = alert.get("active", True)
