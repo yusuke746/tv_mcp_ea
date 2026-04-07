@@ -83,6 +83,8 @@ class TVMcpEA:
             cooldown_seconds=int(brk_cfg["cooldown_seconds"]),
             volume_surge_ratio=float(brk_cfg["volume_surge_ratio"]),
             body_ratio_min=float(brk_cfg["body_ratio_min"]),
+            sweep_timeout_bars=int(brk_cfg.get("sweep_timeout_bars", 16)),
+            sweep_wick_ratio=float(brk_cfg.get("sweep_wick_ratio", 0.3)),
         )
 
         # Market Context 送信器（エグジット支援用）

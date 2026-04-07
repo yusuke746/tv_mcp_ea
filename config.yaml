@@ -63,6 +63,9 @@ breakout:
   volume_surge_ratio: 1.5              # 出来高急増の閾値倍率
   body_ratio_min: 0.5                  # 実体/(高値-安値) 最低比率
   cooldown_seconds: 900                # 同一パターン再発注クールダウン（15分）
+  # Sweep State Machine（S/R レベルのみ）
+  sweep_timeout_bars: 16               # スウィープ後の MSB 待機上限（16本 = 4H）
+  sweep_wick_ratio: 0.3                # 髭が ATR × この倍率以上でスウィープ判定
 
 detection:
   timeframe_entry: "M15"               # ブレイク検知の時間足

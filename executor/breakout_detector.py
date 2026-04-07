@@ -12,6 +12,12 @@
   +2  HTF バイアス      : 1H EMA20 vs EMA50 がブレイク方向に一致
   +3  パターン品質     : AI スコア（または R² ベース fallback）
       ≥75 → +3、55-74 → +2、40-54 → +1、<40 → +0
+
+Sweep State Machine:
+  S/R レベルに対して、まず「スウィープ（髭タッチ→終値戻り）」を検出して
+  pending 状態に遷移し、その後の MSB（終値ブレイク）確認で発火する。
+  これにより「罠にかかった逆張り勢の踏み上げ」のタイミングを捉える。
+  タイムアウト（デフォルト: sweep_timeout_bars 本の 15M = 4H）で pending をリセット。
 """
 
 import asyncio
@@ -19,6 +25,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
+from typing import Optional
 
 import aiohttp
 import numpy as np
@@ -33,6 +40,21 @@ from detection.channel import Channel
 logger = logging.getLogger(__name__)
 
 _COOLDOWN_KEY_FMT = "{symbol}_{kind}_{price:.5f}"
+
+
+@dataclass
+class _SweepPending:
+    """スウィープ検出後の MSB 待機状態。"""
+    level: float
+    direction: str          # 期待するブレイク方向 ("long" | "short")
+    detected_at: float      # time.time() でのタイムスタンプ
+    timeout_seconds: float  # この秒数を超えたら期限切れ
+    pattern_key: str
+    pattern_data: dict
+
+    @property
+    def is_expired(self) -> bool:
+        return time.time() - self.detected_at > self.timeout_seconds
 
 
 @dataclass
@@ -52,6 +74,12 @@ class BreakoutSignal:
 class BreakoutDetector:
     """
     検出済みパターンリストを巡回し、ブレイクアウトシグナルを生成する。
+
+    Sweep State Machine (S/R レベルのみ):
+      1. スウィープ検出: 直近足の髭が S/R を超えるが終値が戻った場合 → pending へ
+      2. MSB 確認: pending 中に終値ブレイクを確認 → 通常の採点 + 発火
+      3. タイムアウト: sweep_timeout_bars 分待っても MSB が来なければ期限切れ
+    トライアングル・チャネルは従来通りの即時終値ブレイク方式。
     """
 
     def __init__(
@@ -63,6 +91,8 @@ class BreakoutDetector:
         cooldown_seconds: int = 900,
         volume_surge_ratio: float = 1.5,
         body_ratio_min: float = 0.60,
+        sweep_timeout_bars: int = 16,
+        sweep_wick_ratio: float = 0.3,
     ):
         self._scorer = ai_scorer
         self._webhook_url = webhook_url
@@ -71,8 +101,15 @@ class BreakoutDetector:
         self._cooldown = cooldown_seconds
         self._vol_ratio = volume_surge_ratio
         self._body_min = body_ratio_min
+        # スウィープ検出設定
+        # sweep_timeout_bars: これ × 15M = 待機時間（デフォルト16本=4H）
+        self._sweep_timeout_sec = sweep_timeout_bars * 15 * 60
+        # sweep_wick_ratio: 髭がATRの何倍以上あればスウィープとみなすか
+        self._sweep_wick_ratio = sweep_wick_ratio
         # クールダウン管理: {cooldown_key: last_trigger_timestamp}
         self._last_trigger: dict[str, float] = {}
+        # Sweep pending 状態: {symbol: {pattern_key: _SweepPending}}
+        self._sweep_pending: dict[str, dict[str, _SweepPending]] = {}
 
     async def detect_and_fire(
         self,
@@ -107,15 +144,164 @@ class BreakoutDetector:
 
         fired: list[BreakoutSignal] = []
 
+        # ── Sweep State Machine ヘルパー ──────────────────────────────────
+        sym_pending = self._sweep_pending.setdefault(mt5_symbol, {})
+
+        # 期限切れ pending を削除
+        expired = [k for k, p in sym_pending.items() if p.is_expired]
+        for k in expired:
+            logger.info(f"[Sweep] Timeout: {mt5_symbol} {sym_pending[k].direction} level={sym_pending[k].level:.5f}")
+            del sym_pending[k]
+
+        def _is_sweep(level: float, direction: str) -> bool:
+            """
+            直近確定足が S/R を髭で超えて終値が戻った「スウィープ」を判定する。
+
+            long (上抜きスウィープ): high > level かつ close < level
+              → レジスタンス上にある踏み上げ狩りが発生し、下から押し戻された
+            short (下抜きスウィープ): low < level かつ close > level
+              → サポート下にある逆張り狩りが発生し、上から押し戻された
+
+            さらに、髭の長さが ATR × sweep_wick_ratio 以上必要（ノイズ排除）。
+            """
+            atr = ohlcv_15m.atr14
+            if direction == "long":
+                # 髭が level を超えているか
+                if high_price <= level:
+                    return False
+                # 終値がレベルを越えていない（クローズ確認なし = 戻った）
+                if close_price >= level:
+                    return False
+                # 上髭の長さチェック
+                upper_wick = high_price - max(close_price, open_price)
+                return upper_wick >= atr * self._sweep_wick_ratio
+            else:
+                if low_price >= level:
+                    return False
+                if close_price <= level:
+                    return False
+                lower_wick = min(close_price, open_price) - low_price
+                return lower_wick >= atr * self._sweep_wick_ratio
+
+        async def _try_fire_sr(level: float, direction: str, pattern_key: str, pattern_data: dict):
+            """S/R レベル専用: Sweep State Machine を経由した発火判定。"""
+            cd_key = f"{mt5_symbol}_{pattern_key}_{direction}"
+
+            # ── クールダウン確認 ────────────────────────────────────────
+            if time.time() - self._last_trigger.get(cd_key, 0) < self._cooldown:
+                logger.debug(f"Cooldown active: {cd_key}")
+                return
+
+            close_exceeds = (
+                (direction == "long" and close_price > level)
+                or (direction == "short" and close_price < level)
+            )
+
+            # ── ケース A: Pending 中に MSB 確認 → 発火 ─────────────────
+            if cd_key in sym_pending:
+                pending = sym_pending[cd_key]
+                if close_exceeds:
+                    logger.info(
+                        f"[Sweep] MSB confirmed: {mt5_symbol} {direction} level={level:.5f} "
+                        f"(sweep→MSB elapsed={time.time()-pending.detected_at:.0f}s)"
+                    )
+                    del sym_pending[cd_key]
+                    # 採点して発火（通常と同じ）
+                    close_pts = 2
+                    htf_pts = htf_long if direction == "long" else htf_short
+                    ps: PatternScore = await self._scorer.score_pattern(
+                        {**pattern_data, "symbol": mt5_symbol, "direction": direction,
+                         "current_price": close_price, "atr": ohlcv_15m.atr14,
+                         "sweep_confirmed": True}
+                    )
+                    ai_pts = 3 if ps.score >= 75 else (2 if ps.score >= 55 else (1 if ps.score >= 40 else 0))
+                    # Sweep 確認ボーナス: +1（罠からの逆転シグナルは品質が高い）
+                    total = close_pts + vol_points + body_points + htf_pts + ai_pts + 1
+                    logger.info(
+                        f"{mt5_symbol} {direction} [SWEEP→MSB] Pattern={pattern_key} "
+                        f"score={total}/11 (close=2 vol={vol_points} body={body_points} "
+                        f"htf={htf_pts} ai={ai_pts} sweep_bonus=1 ai_q={ps.score})"
+                    )
+                    if total < self._threshold:
+                        return
+                    sig = BreakoutSignal(
+                        symbol=mt5_symbol,
+                        tv_symbol=tv_symbol,
+                        direction=direction,
+                        close=close_price,
+                        atr=ohlcv_15m.atr14,
+                        level=level,
+                        pattern=pattern_key + "_sweep_msb",
+                        breakout_score=total,
+                        ai_quality_score=ps.score,
+                        ai_reason=ps.reason,
+                    )
+                    self._last_trigger[cd_key] = time.time()
+                    await self._post_webhook(sig)
+                    fired.append(sig)
+                # Pending 中だがまだ MSB 待ち → スキップ
+                return
+
+            # ── ケース B: スウィープ検出 → Pending 遷移 ─────────────────
+            if _is_sweep(level, direction):
+                sym_pending[cd_key] = _SweepPending(
+                    level=level,
+                    direction=direction,
+                    detected_at=time.time(),
+                    timeout_seconds=self._sweep_timeout_sec,
+                    pattern_key=pattern_key,
+                    pattern_data=pattern_data,
+                )
+                logger.info(
+                    f"[Sweep] Detected: {mt5_symbol} {direction} level={level:.5f} "
+                    f"(timeout={self._sweep_timeout_sec/3600:.1f}h)"
+                )
+                return
+
+            # ── ケース C: スウィープなしの通常終値ブレイク → 即時採点 ────
+            if not close_exceeds:
+                return
+
+            htf_pts = htf_long if direction == "long" else htf_short
+            ps = await self._scorer.score_pattern(
+                {**pattern_data, "symbol": mt5_symbol, "direction": direction,
+                 "current_price": close_price, "atr": ohlcv_15m.atr14}
+            )
+            ai_pts = 3 if ps.score >= 75 else (2 if ps.score >= 55 else (1 if ps.score >= 40 else 0))
+            total = 2 + vol_points + body_points + htf_pts + ai_pts
+
+            logger.info(
+                f"{mt5_symbol} {direction} Pattern={pattern_key} "
+                f"score={total}/10 (close=2 vol={vol_points} body={body_points} "
+                f"htf={htf_pts} ai={ai_pts} ai_q={ps.score})"
+            )
+            if total < self._threshold:
+                return
+
+            sig = BreakoutSignal(
+                symbol=mt5_symbol,
+                tv_symbol=tv_symbol,
+                direction=direction,
+                close=close_price,
+                atr=ohlcv_15m.atr14,
+                level=level,
+                pattern=pattern_key,
+                breakout_score=total,
+                ai_quality_score=ps.score,
+                ai_reason=ps.reason,
+            )
+            self._last_trigger[cd_key] = time.time()
+            await self._post_webhook(sig)
+            fired.append(sig)
+
         async def _try_fire(level: float, direction: str, pattern_key: str, pattern_data: dict):
+            """トライアングル・チャネル用: 従来通りの即時終値ブレイク方式。"""
             # +2 クローズ確認
             if direction == "long" and close_price <= level:
                 return
             if direction == "short" and close_price >= level:
                 return
-            close_pts = 2
 
-            # 小数切り捨てでクールダウンキーを生成
             cd_key = f"{mt5_symbol}_{pattern_key}_{direction}"
             if time.time() - self._last_trigger.get(cd_key, 0) < self._cooldown:
                 logger.debug(f"Cooldown active: {cd_key}")
@@ -131,7 +317,7 @@ class BreakoutDetector:
             )
             ai_pts = 3 if ps.score >= 75 else (2 if ps.score >= 55 else (1 if ps.score >= 40 else 0))
 
-            total = close_pts + vol_points + body_points + htf_pts + ai_pts
+            total = 2 + vol_points + body_points + htf_pts + ai_pts
 
             logger.info(
                 f"{mt5_symbol} {direction} Pattern={pattern_key} "
@@ -169,9 +355,9 @@ class BreakoutDetector:
                 "touches": lvl.touches,
             }
             if lvl.kind in ("resistance", "both"):
-                await _try_fire(lvl.price, "long", f"sr_resistance_{lvl.price:.5f}", pd_data)
+                await _try_fire_sr(lvl.price, "long", f"sr_resistance_{lvl.price:.5f}", pd_data)
             if lvl.kind in ("support", "both"):
-                await _try_fire(lvl.price, "short", f"sr_support_{lvl.price:.5f}", pd_data)
+                await _try_fire_sr(lvl.price, "short", f"sr_support_{lvl.price:.5f}", pd_data)
 
         # ─── トライアングル ──────────────────────────────────────────────────
         for tri in triangles:
