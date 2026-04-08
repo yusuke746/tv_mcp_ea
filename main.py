@@ -467,6 +467,7 @@ class TVMcpEA:
                     current_price=current_price,
                     atr=ohlcv_15m.atr14,
                     open_positions=open_positions,
+                    indicators=indicators,
                 )
                 logger.debug(f"{mt5_sym}: {n_alerts} TV alerts updated")
             except Exception as e:

@@ -70,6 +70,8 @@ class AlertManager:
         self._local_tv_alert_url = local_tv_alert_url or tv_alert_webhook_url or ""
         # 転送済みアラートID（再起動するまで保持、重複転送防止）
         self._forwarded_alert_ids: set = set()
+        # シンボルごとの最新テクニカル指標スナップショット
+        self._latest_indicators_by_pair: dict[str, dict] = {}
 
     def update_webhook_url(self, url: str) -> None:
         """webhook URL を動的に更新する（ngrok URL が変わった場合に呼び出す）。"""
@@ -86,6 +88,7 @@ class AlertManager:
         current_price: float,
         atr: float,
         open_positions: list[dict] | None = None,
+        indicators: dict | None = None,
     ) -> int:
         """
         指定シンボルの MCP-EA 管理アラートを更新する。
@@ -100,6 +103,9 @@ class AlertManager:
         """
         # ── 古いアラートの削除 ──────────────────────────────
         await self._delete_old_alerts(tv_symbol)
+
+        if indicators:
+            self._latest_indicators_by_pair[mt5_symbol] = dict(indicators)
 
         # ── 重要レベルの選定 ─────────────────────────────────
         candidates = self._pick_levels(
@@ -339,6 +345,11 @@ class AlertManager:
                 logger.debug(f"No JSON payload found in alert {alert_id}, skipping forward")
                 self._forwarded_alert_ids.add(alert_id)  # 再試行しない
                 continue
+
+            pair = payload.get("pair", "")
+            indicators = self._latest_indicators_by_pair.get(pair)
+            if indicators and payload.get("signal_source") != "exit_alert":
+                payload["indicators"] = dict(indicators)
 
             try:
                 async with aiohttp.ClientSession() as session:
