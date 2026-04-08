@@ -455,27 +455,6 @@ class TVMcpEA:
                 logger.warning(f"CDP drawing failed: {e} — reconnecting next cycle")
                 self._cdp_connected = False
 
-        # ─── TV アラート更新（古いアラート削除 → 新アラート設定）────────────
-        if self._cdp_connected and self._alerts_enabled and drawings_updated:
-            try:
-                n_alerts = await self._alert_mgr.update_alerts(
-                    tv_symbol=tv_sym,
-                    mt5_symbol=mt5_sym,
-                    sr_levels=sr_levels,
-                    triangles=triangles,
-                    channels=channels,
-                    current_price=current_price,
-                    atr=ohlcv_15m.atr14,
-                    open_positions=open_positions,
-                    indicators=indicators,
-                )
-                logger.debug(f"{mt5_sym}: {n_alerts} TV alerts updated")
-            except Exception as e:
-                logger.warning(f"Alert update failed: {e}")
-        elif self._cdp_connected and self._alerts_enabled:
-            logger.debug(f"{mt5_sym}: skip alerts because chart is not showing {tv_sym}")
-
-        # ─── ブレイクアウト検出 & webhook POST ─────────────────────────────
         if ohlcv_1h is None:
             logger.warning(f"1H data unavailable for {mt5_sym}, HTF bias skipped")
             from data_feed import OHLCVData
@@ -509,6 +488,27 @@ class TVMcpEA:
             )
             logger.debug(f"{mt5_sym}: Using Python indicator fallback")
 
+        # ─── TV アラート更新（古いアラート削除 → 新アラート設定）────────────
+        if self._cdp_connected and self._alerts_enabled and drawings_updated:
+            try:
+                n_alerts = await self._alert_mgr.update_alerts(
+                    tv_symbol=tv_sym,
+                    mt5_symbol=mt5_sym,
+                    sr_levels=sr_levels,
+                    triangles=triangles,
+                    channels=channels,
+                    current_price=current_price,
+                    atr=ohlcv_15m.atr14,
+                    open_positions=open_positions,
+                    indicators=indicators,
+                )
+                logger.debug(f"{mt5_sym}: {n_alerts} TV alerts updated")
+            except Exception as e:
+                logger.warning(f"Alert update failed: {e}")
+        elif self._cdp_connected and self._alerts_enabled:
+            logger.debug(f"{mt5_sym}: skip alerts because chart is not showing {tv_sym}")
+
+        # ─── ブレイクアウト検出 & webhook POST ─────────────────────────────
         fired = await self._detector.detect_and_fire(
             tv_symbol=tv_sym,
             mt5_symbol=mt5_sym,
