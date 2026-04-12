@@ -106,11 +106,20 @@ class TVMcpEA:
         # スケジューラ
         self._scheduler = AsyncIOScheduler()
         self._scan_interval = int(sys_cfg["scan_interval_seconds"])
+        # シグナル送信モード:
+        # - tv_alert_only: TradingView アラート転送のみ使用（MCP直送は無効）
+        # - hybrid: tv_alert + MCP直送の両方を使用
+        self._signal_mode = str(sys_cfg.get("signal_mode", "tv_alert_only")).lower()
+        self._mcp_direct_enabled = self._signal_mode != "tv_alert_only"
 
     # ─── ライフサイクル ─────────────────────────────────────────────────────
 
     async def start(self) -> None:
         logger.info("TV MCP EA starting...")
+        logger.info(
+            f"Signal mode: {self._signal_mode} "
+            f"(mcp_direct_enabled={self._mcp_direct_enabled}, tv_alert_enabled={self._alerts_enabled})"
+        )
 
         # MT5 接続
         if not self._data_feed.connect():
@@ -509,19 +518,22 @@ class TVMcpEA:
             logger.debug(f"{mt5_sym}: skip alerts because chart is not showing {tv_sym}")
 
         # ─── ブレイクアウト検出 & webhook POST ─────────────────────────────
-        fired = await self._detector.detect_and_fire(
-            tv_symbol=tv_sym,
-            mt5_symbol=mt5_sym,
-            ohlcv_15m=ohlcv_15m,
-            ohlcv_1h=ohlcv_1h_safe,
-            sr_levels=sr_levels,
-            triangles=triangles,
-            channels=channels,
-            indicators=indicators,
-        )
+        if self._mcp_direct_enabled:
+            fired = await self._detector.detect_and_fire(
+                tv_symbol=tv_sym,
+                mt5_symbol=mt5_sym,
+                ohlcv_15m=ohlcv_15m,
+                ohlcv_1h=ohlcv_1h_safe,
+                sr_levels=sr_levels,
+                triangles=triangles,
+                channels=channels,
+                indicators=indicators,
+            )
 
-        if fired:
-            logger.info(f"{mt5_sym}: {len(fired)} breakout signal(s) fired")
+            if fired:
+                logger.info(f"{mt5_sym}: {len(fired)} breakout signal(s) fired")
+        else:
+            logger.debug(f"{mt5_sym}: mcp direct webhook skipped (signal_mode=tv_alert_only)")
 
         # ─── Market Context 送信（エグジット支援）──────────────────────────
         ctx = self._context_sender.build_context(

@@ -1,5 +1,6 @@
 system:
   scan_interval_seconds: 300           # 5分ごとにスキャン
+  signal_mode: "tv_alert_only"        # "tv_alert_only" | "hybrid"
   cdp_host: "localhost"
   cdp_port: 9222
   fx_system_webhook_url: "http://localhost:80/webhook/mcp"
