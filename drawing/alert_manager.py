@@ -475,10 +475,19 @@ class AlertManager:
                         action = "exit"
                         exit_type = "sl"
 
-            # エグジットレベルは高優先度（ポジション保護）
+            # TP 品質フィルタ: 利幅が小さすぎる or 単発ノイズレベルはスキップ
+            if exit_type == "tp":
+                if dist < atr * 0.5:
+                    continue  # ATR の半分未満は見合わない
+                if lvl.touches < 2:
+                    continue  # タッチ1回のノイズレベルは除外
+
+            # 優先度: TP はタッチ数に比例（品質重視）、SL は固定ボーナスで即応維持
             base_priority = lvl.touches * 10 + max(0, 30 - dist / atr * 10)
-            if action == "exit":
-                base_priority += 60  # エグジットを優先
+            if exit_type == "tp":
+                base_priority += lvl.touches * 15  # 強固なレベルほど高優先
+            elif action == "exit":  # sl
+                base_priority += 60  # SL は即応優先を維持
 
             candidates.append({
                 "price": lvl.price,
@@ -517,8 +526,14 @@ class AlertManager:
                         action = "exit"
                         exit_type = "sl"
 
+                # TP 品質フィルタ: ATR*0.5 未満の近接レベルはスキップ
+                if exit_type == "tp" and dist < atr * 0.5:
+                    continue
+
                 base_priority = 20 + max(0, 30 - dist / atr * 10)
-                if action == "exit":
+                if exit_type == "tp":
+                    base_priority += 30  # トライアングルは固定ボーナス（touches なし）
+                elif action == "exit":  # sl
                     base_priority += 60
 
                 candidates.append({
@@ -558,8 +573,14 @@ class AlertManager:
                         action = "exit"
                         exit_type = "sl"
 
+                # TP 品質フィルタ: ATR*0.5 未満の近接レベルはスキップ
+                if exit_type == "tp" and dist < atr * 0.5:
+                    continue
+
                 base_priority = 15 + max(0, 30 - dist / atr * 10)
-                if action == "exit":
+                if exit_type == "tp":
+                    base_priority += 25  # チャネルは固定ボーナス（touches なし）
+                elif action == "exit":  # sl
                     base_priority += 60
 
                 candidates.append({
