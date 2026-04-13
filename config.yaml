@@ -9,7 +9,7 @@ system:
   # ngrok が停止中のフォールバック。ngrok 使用時は空のままでもよい
   tv_alert_webhook_url: ""
   # ngrok ローカル API（ngrok が動いている場合は自動で公開 URL を取得）
-  ngrok_local_api: "http://localhost:4040"
+  ngrok_local_api: ""                # 空なら ngrok 自動解決を無効化
   # TV アラート webhook の path（ngrok URL に付加される）
   tv_alert_webhook_path: "/webhook/tv_alert"
   log_level: "INFO"

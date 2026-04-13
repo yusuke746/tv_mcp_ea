@@ -244,9 +244,16 @@ class TVMcpEA:
         Returns: 解決した webhook URL（更新なしの場合は None）
         """
         sys_cfg = self._cfg["system"]
-        ngrok_api = sys_cfg.get("ngrok_local_api", "http://localhost:4040")
+        ngrok_api = str(sys_cfg.get("ngrok_local_api", "http://localhost:4040") or "").strip()
         path = sys_cfg.get("tv_alert_webhook_path", "/webhook/tv_alert")
         fallback = sys_cfg.get("tv_alert_webhook_url", "")
+
+        # ngrok を使わない運用では URL 解決をスキップして警告ノイズを抑える
+        if not ngrok_api:
+            if fallback:
+                self._alert_mgr.update_webhook_url(fallback)
+                return fallback
+            return None
 
         import aiohttp as _aiohttp
         try:
@@ -275,7 +282,7 @@ class TVMcpEA:
             return webhook_url
 
         except Exception as e:
-            logger.warning(f"ngrok URL resolution failed: {e} — using fallback: {fallback!r}")
+            logger.debug(f"ngrok URL resolution skipped/failed: {e} — using fallback: {fallback!r}")
             if fallback:
                 self._alert_mgr.update_webhook_url(fallback)
             return None
