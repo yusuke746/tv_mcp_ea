@@ -3,8 +3,8 @@ system:
   signal_mode: "tv_alert_only"        # "tv_alert_only" | "hybrid"
   cdp_host: "localhost"
   cdp_port: 9222
-  fx_system_webhook_url: "http://localhost:80/webhook/mcp"
-  fx_system_context_webhook_url: "http://localhost:80/webhook/mcp_context"
+  fx_system_webhook_url: "https://ammie-authorizable-instructedly.ngrok-free.dev/webhook/mcp"
+  fx_system_context_webhook_url: "https://ammie-authorizable-instructedly.ngrok-free.dev/webhook/mcp_context"
   # tv_alert_webhook_url: ngrok が有効な場合は起動時に自動解決される
   # ngrok が停止中のフォールバック。ngrok 使用時は空のままでもよい
   tv_alert_webhook_url: ""
